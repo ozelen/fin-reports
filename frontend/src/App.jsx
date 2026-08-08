@@ -19,6 +19,8 @@ import Folders from "./pages/Folders";
 import Tags from "./pages/Tags";
 import Rules from "./pages/Rules";
 import Accounts from "./pages/Accounts";
+import Clients from "./pages/Clients";
+import Invoices from "./pages/Invoices";
 import Backup from "./pages/Backup";
 
 function RequireAuth({ children }) {
@@ -33,6 +35,8 @@ const TABS = [
   { label: "Tags", value: "/tags" },
   { label: "Rules", value: "/rules" },
   { label: "Accounts", value: "/accounts" },
+  { label: "Clients", value: "/clients" },
+  { label: "Invoices", value: "/invoices" },
   { label: "Upload", value: "/upload" },
   { label: "Backup", value: "/backup" },
 ];
@@ -99,6 +103,8 @@ export default function App() {
       <Route path="/tags" element={<Protected><Tags /></Protected>} />
       <Route path="/rules" element={<Protected><Rules /></Protected>} />
       <Route path="/accounts" element={<Protected><Accounts /></Protected>} />
+      <Route path="/clients" element={<Protected><Clients /></Protected>} />
+      <Route path="/invoices" element={<Protected><Invoices /></Protected>} />
       <Route path="/upload" element={<Protected><UploadPage /></Protected>} />
       <Route path="/backup" element={<Protected><Backup /></Protected>} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

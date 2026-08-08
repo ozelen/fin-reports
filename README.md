@@ -24,6 +24,9 @@ served together via **Docker Compose**.
   Parent folders roll up all descendants for totals and export.
 - AI classification (OpenAI): suggest tags for untagged transactions; review and apply.
 - Export any folder to `.xlsx` with totals (income, expenses, or both), recursively.
+- Invoicing: clients, issuer profile, draft→issued registry (immutable once issued),
+  working-days hour advisor (`8 × Mon–Fri`), bank-account requisites snapshotted onto
+  each invoice, XLSX/PDF generation, and import of existing `.xlsx` invoices.
 - JWT authentication. A single superuser is seeded from environment variables.
 
 ### The shared "criteria" concept

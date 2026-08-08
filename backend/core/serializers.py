@@ -1,6 +1,17 @@
 from rest_framework import serializers
 
-from .models import Account, Folder, Rule, Tag, Transaction, TransactionTag, Upload
+from .models import (
+    Account,
+    Client,
+    Folder,
+    Invoice,
+    IssuerProfile,
+    Rule,
+    Tag,
+    Transaction,
+    TransactionTag,
+    Upload,
+)
 
 
 class OwnerScopedPKField(serializers.PrimaryKeyRelatedField):
@@ -30,12 +41,154 @@ class AccountSerializer(serializers.ModelSerializer):
             "name",
             "bank",
             "iban",
+            "bic",
+            "correspondent_bic",
+            "bank_address",
             "currency",
             "is_default",
+            "is_invoice_default",
             "transaction_count",
             "created_at",
         ]
         read_only_fields = ["id", "transaction_count", "created_at"]
+
+
+class IssuerProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IssuerProfile
+        fields = [
+            "id",
+            "legal_name",
+            "trade_name",
+            "vat_number",
+            "address",
+            "city",
+            "country",
+            "phone",
+            "email",
+            "legal_form",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class ClientSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Client
+        fields = [
+            "id",
+            "name",
+            "tax_id",
+            "address",
+            "vat_mode",
+            "default_vat_rate",
+            "default_description",
+            "default_unit_price",
+            "currency",
+            "notes",
+            "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
+
+class InvoiceSerializer(serializers.ModelSerializer):
+    client = OwnerScopedPKField(model=Client)
+    account = OwnerScopedPKField(model=Account, required=False, allow_null=True)
+    client_label = serializers.CharField(source="client.name", read_only=True)
+    account_label = serializers.CharField(source="account.name", read_only=True)
+    is_issued = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Invoice
+        fields = [
+            "id",
+            "status",
+            "number",
+            "client",
+            "client_label",
+            "account",
+            "account_label",
+            "service_year",
+            "service_month",
+            "issue_date",
+            "sale_date",
+            "due_date",
+            "description",
+            "quantity",
+            "unit_price",
+            "currency",
+            "vat_rate",
+            "vat_label",
+            "net_amount",
+            "vat_amount",
+            "total_amount",
+            "notes",
+            "issuer_name",
+            "issuer_trade_name",
+            "issuer_vat_number",
+            "issuer_address",
+            "issuer_city",
+            "issuer_country",
+            "issuer_phone",
+            "issuer_email",
+            "issuer_legal_form",
+            "client_name",
+            "client_tax_id",
+            "client_address",
+            "vat_mode",
+            "account_name",
+            "bank_name",
+            "iban",
+            "bic",
+            "correspondent_bic",
+            "bank_address",
+            "xlsx_file",
+            "pdf_file",
+            "issued_at",
+            "is_issued",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "status",
+            "net_amount",
+            "vat_amount",
+            "total_amount",
+            "issuer_name",
+            "issuer_trade_name",
+            "issuer_vat_number",
+            "issuer_address",
+            "issuer_city",
+            "issuer_country",
+            "issuer_phone",
+            "issuer_email",
+            "issuer_legal_form",
+            "client_name",
+            "client_tax_id",
+            "client_address",
+            "vat_mode",
+            "account_name",
+            "bank_name",
+            "iban",
+            "bic",
+            "correspondent_bic",
+            "bank_address",
+            "xlsx_file",
+            "pdf_file",
+            "issued_at",
+            "is_issued",
+            "created_at",
+            "updated_at",
+        ]
+        extra_kwargs = {
+            "number": {"required": False, "allow_blank": True},
+            "account": {"required": False, "allow_null": True},
+            "notes": {"required": False, "allow_blank": True},
+            "vat_rate": {"required": False},
+            "vat_label": {"required": False, "allow_blank": True},
+        }
 
 
 class UploadSerializer(serializers.ModelSerializer):

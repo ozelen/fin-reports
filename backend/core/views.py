@@ -1,5 +1,7 @@
 import datetime as dt
+import tempfile
 from collections import defaultdict
+from pathlib import Path
 
 from django.core import serializers as dj_serializers
 from django.core.management.color import no_style
@@ -26,15 +28,30 @@ from .criteria import apply_criteria
 from .export import build_workbook
 from .filters import TransactionFilter
 from .folders import descendants, folder_transaction_ids, own_transaction_ids, subtree
-from .models import Account, Folder, Rule, Tag, Transaction, TransactionTag, Upload
+from . import invoicing
+from .models import (
+    Account,
+    Client,
+    Folder,
+    Invoice,
+    IssuerProfile,
+    Rule,
+    Tag,
+    Transaction,
+    TransactionTag,
+    Upload,
+)
 from .rules import apply_rules
 from .serializers import (
     AccountSerializer,
     AiApplySerializer,
     AiClassifySerializer,
     BulkTagSerializer,
+    ClientSerializer,
     FolderSerializer,
     FolderTransactionsSerializer,
+    InvoiceSerializer,
+    IssuerProfileSerializer,
     RuleSerializer,
     TagSerializer,
     TransactionSerializer,
@@ -366,18 +383,260 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         account = serializer.save(owner=self.request.user)
-        self._sync_default(account)
+        self._sync_defaults(account)
 
     def perform_update(self, serializer):
         account = serializer.save()
-        self._sync_default(account)
+        self._sync_defaults(account)
 
-    def _sync_default(self, account):
-        """Keep at most one default account per owner."""
+    def _sync_defaults(self, account):
+        """Keep at most one upload-default and one invoice-default per owner."""
         if account.is_default:
             Account.objects.filter(owner=account.owner).exclude(
                 id=account.id
             ).update(is_default=False)
+        if account.is_invoice_default:
+            Account.objects.filter(owner=account.owner).exclude(
+                id=account.id
+            ).update(is_invoice_default=False)
+
+
+class IssuerProfileView(APIView):
+    """GET/PUT the current user's issuer profile (create on first save)."""
+
+    def get(self, request):
+        profile = IssuerProfile.objects.filter(owner=request.user).first()
+        if not profile:
+            return Response(None)
+        return Response(IssuerProfileSerializer(profile).data)
+
+    def put(self, request):
+        profile = IssuerProfile.objects.filter(owner=request.user).first()
+        if profile:
+            serializer = IssuerProfileSerializer(profile, data=request.data)
+        else:
+            serializer = IssuerProfileSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(owner=request.user)
+        return Response(serializer.data)
+
+
+class ClientViewSet(viewsets.ModelViewSet):
+    serializer_class = ClientSerializer
+
+    def get_queryset(self):
+        return Client.objects.filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class InvoiceViewSet(viewsets.ModelViewSet):
+    serializer_class = InvoiceSerializer
+    filterset_fields = ["status", "client", "service_year", "service_month"]
+    search_fields = ["number", "description", "client_name"]
+    ordering_fields = [
+        "issue_date",
+        "sale_date",
+        "number",
+        "total_amount",
+        "service_year",
+        "service_month",
+    ]
+    ordering = ["-issue_date", "-id"]
+
+    def get_queryset(self):
+        return Invoice.objects.filter(owner=self.request.user).select_related(
+            "client", "account"
+        )
+
+    def _guard_mutable(self, invoice: Invoice):
+        if invoice.is_issued:
+            raise ValidationError(
+                {"detail": "Issued invoices are immutable. Create a new draft instead."}
+            )
+
+    def perform_create(self, serializer):
+        issue_date = serializer.validated_data.get("issue_date") or dt.date.today()
+        number = (serializer.validated_data.get("number") or "").strip() or (
+            invoicing.suggest_number(self.request.user, issue_date)
+        )
+        invoice = serializer.save(
+            owner=self.request.user,
+            status=Invoice.STATUS_DRAFT,
+            number=number,
+        )
+        self._prepare_draft(invoice, serializer.validated_data)
+        invoice.save()
+
+    def perform_update(self, serializer):
+        self._guard_mutable(serializer.instance)
+        invoice = serializer.save()
+        self._prepare_draft(invoice, serializer.validated_data)
+        invoice.save()
+
+    def perform_destroy(self, instance):
+        self._guard_mutable(instance)
+        instance.delete()
+
+    def _prepare_draft(self, invoice: Invoice, data: dict):
+        if not invoice.account_id:
+            invoice.account = invoicing.default_invoice_account(invoice.owner)
+        client = invoice.client if invoice.client_id else None
+        if client and not data.get("description") and not invoice.description:
+            invoice.description = client.default_description
+        if client and "unit_price" not in data and invoice.unit_price in (None, 0):
+            invoice.unit_price = client.default_unit_price
+        if client and "currency" not in data:
+            invoice.currency = client.currency or invoice.currency
+        if not invoice.number:
+            invoice.number = invoicing.suggest_number(invoice.owner, invoice.issue_date)
+        invoicing.apply_snapshots(invoice)
+        invoice.recalculate_amounts()
+
+    @action(detail=False, methods=["get"])
+    def advise(self, request):
+        try:
+            year = int(request.query_params["year"])
+            month = int(request.query_params["month"])
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValidationError(
+                {"detail": "Query params 'year' and 'month' are required."}
+            ) from exc
+        if month < 1 or month > 12:
+            raise ValidationError({"detail": "month must be 1–12."})
+        hours_per_day = int(request.query_params.get("hours_per_day", 8))
+        advice = invoicing.advise_hours(year, month, hours_per_day=hours_per_day)
+        unit_price = request.query_params.get("unit_price")
+        if unit_price is not None:
+            from decimal import Decimal
+
+            price = Decimal(unit_price)
+            advice["unit_price"] = str(price)
+            advice["suggested_net"] = str(
+                (Decimal(advice["suggested_hours"]) * price).quantize(Decimal("0.01"))
+            )
+        issue = dt.date.today()
+        advice["suggested_issue_date"] = issue.isoformat()
+        advice["suggested_due_date"] = (issue + dt.timedelta(days=14)).isoformat()
+        advice["suggested_number"] = invoicing.suggest_number(request.user, issue)
+        return Response(advice)
+
+    @action(detail=True, methods=["post"])
+    def issue(self, request, pk=None):
+        invoice = self.get_object()
+        self._guard_mutable(invoice)
+        if not IssuerProfile.objects.filter(owner=request.user).exists():
+            raise ValidationError(
+                {"detail": "Set your issuer profile before issuing an invoice."}
+            )
+        if not invoice.account_id and not invoicing.default_invoice_account(request.user):
+            raise ValidationError(
+                {"detail": "Select a bank account (with IBAN) before issuing."}
+            )
+        try:
+            invoicing.issue_invoice(invoice)
+        except ValueError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+        return Response(self.get_serializer(invoice).data)
+
+    @action(detail=True, methods=["get"])
+    def download(self, request, pk=None):
+        invoice = self.get_object()
+        # Use `kind`, not `format` — DRF reserves `format` for content negotiation.
+        kind = request.query_params.get("kind", "pdf")
+        if kind not in ("pdf", "xlsx"):
+            raise ValidationError({"detail": "kind must be 'pdf' or 'xlsx'."})
+        # Always render from snapshotted invoice fields so font/layout fixes
+        # apply to older issued invoices without mutating their data.
+        if invoice.status != Invoice.STATUS_ISSUED:
+            invoicing.apply_snapshots(invoice)
+            invoice.recalculate_amounts()
+        content = (
+            invoicing.build_pdf(invoice)
+            if kind == "pdf"
+            else invoicing.build_xlsx(invoice)
+        )
+        content_type = (
+            "application/pdf"
+            if kind == "pdf"
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response = HttpResponse(content, content_type=content_type)
+        response["Content-Disposition"] = (
+            f'attachment; filename="invoice-{invoice.number}.{kind}"'
+        )
+        return response
+
+    @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
+    def import_xlsx(self, request):
+        file_obj = request.FILES.get("file")
+        if not file_obj:
+            raise ValidationError({"detail": "No file provided (form field 'file')."})
+        client_id = request.data.get("client")
+        client = Client.objects.filter(owner=request.user, id=client_id).first()
+        if not client:
+            raise ValidationError({"detail": "client id is required."})
+
+        suffix = Path(file_obj.name).suffix or ".xlsx"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            for chunk in file_obj.chunks():
+                tmp.write(chunk)
+            tmp_path = Path(tmp.name)
+        try:
+            parsed = invoicing.parse_invoice_xlsx(tmp_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        if not parsed["issue_date"] or not parsed["sale_date"]:
+            raise ValidationError(
+                {"detail": "Could not determine issue/sale dates from the file."}
+            )
+
+        number = parsed["number"]
+        if Invoice.objects.filter(owner=request.user, number=number).exists():
+            raise ValidationError({"detail": f"Invoice #{number} already exists."})
+
+        account = invoicing.default_invoice_account(request.user)
+        invoice = Invoice(
+            owner=request.user,
+            status=Invoice.STATUS_DRAFT,
+            number=number,
+            client=client,
+            account=account,
+            service_year=parsed["sale_date"].year,
+            service_month=parsed["sale_date"].month,
+            issue_date=parsed["issue_date"],
+            sale_date=parsed["sale_date"],
+            due_date=parsed["due_date"] or parsed["issue_date"] + dt.timedelta(days=14),
+            description=parsed["description"] or client.default_description,
+            quantity=parsed["quantity"],
+            unit_price=parsed["unit_price"] or client.default_unit_price,
+            currency=client.currency,
+        )
+        invoicing.apply_snapshots(invoice)
+        for key in (
+            "iban",
+            "bic",
+            "correspondent_bic",
+            "bank_address",
+            "issuer_name",
+            "issuer_phone",
+            "issuer_email",
+            "issuer_vat_number",
+            "issuer_address",
+            "issuer_legal_form",
+            "client_name",
+            "client_address",
+        ):
+            if parsed.get(key):
+                setattr(invoice, key, parsed[key])
+        invoice.recalculate_amounts()
+        invoicing.attach_generated_files(invoice)
+        invoice.status = Invoice.STATUS_ISSUED
+        invoice.issued_at = timezone.now()
+        invoice.save()
+        return Response(self.get_serializer(invoice).data, status=status.HTTP_201_CREATED)
 
 
 class TagViewSet(viewsets.ModelViewSet):
@@ -667,7 +926,18 @@ class AiViewSet(viewsets.ViewSet):
 
 
 # Models included in a backup, in dependency order for restore.
-BACKUP_MODELS = [Account, Tag, Rule, Upload, Transaction, TransactionTag, Folder]
+BACKUP_MODELS = [
+    Account,
+    IssuerProfile,
+    Client,
+    Tag,
+    Rule,
+    Upload,
+    Transaction,
+    TransactionTag,
+    Folder,
+    Invoice,
+]
 
 
 class BackupExportView(APIView):
@@ -677,12 +947,15 @@ class BackupExportView(APIView):
         user = request.user
         querysets = [
             Account.objects.filter(owner=user),
+            IssuerProfile.objects.filter(owner=user),
+            Client.objects.filter(owner=user),
             Tag.objects.filter(owner=user),
             Rule.objects.filter(owner=user),
             Upload.objects.filter(owner=user),
             Transaction.objects.filter(owner=user),
             TransactionTag.objects.filter(transaction__owner=user),
             Folder.objects.filter(owner=user),
+            Invoice.objects.filter(owner=user),
         ]
         objects = [obj for qs in querysets for obj in qs]
         data = dj_serializers.serialize("json", objects, indent=2)
@@ -720,11 +993,14 @@ class BackupImportView(APIView):
         try:
             with db_transaction.atomic():
                 # Deleting transactions/uploads cascades their tag links.
+                Invoice.objects.filter(owner=user).delete()
                 Folder.objects.filter(owner=user).delete()
                 Rule.objects.filter(owner=user).delete()
                 Transaction.objects.filter(owner=user).delete()
                 Upload.objects.filter(owner=user).delete()
                 Tag.objects.filter(owner=user).delete()
+                Client.objects.filter(owner=user).delete()
+                IssuerProfile.objects.filter(owner=user).delete()
                 Account.objects.filter(owner=user).delete()
 
                 counts = defaultdict(int)
