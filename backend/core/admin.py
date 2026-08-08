@@ -3,6 +3,7 @@ from django.contrib import admin
 from .models import (
     Account,
     Client,
+    Document,
     Folder,
     Invoice,
     IssuerProfile,
@@ -99,6 +100,20 @@ class ClientAdmin(admin.ModelAdmin):
     list_display = ("name", "tax_id", "vat_mode", "currency", "owner", "created_at")
     list_filter = ("owner", "vat_mode", "currency")
     search_fields = ("name", "tax_id")
+
+
+@admin.register(Document)
+class DocumentAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "kind",
+        "client",
+        "document_date",
+        "owner",
+        "created_at",
+    )
+    list_filter = ("owner", "kind")
+    search_fields = ("title", "original_filename", "notes")
 
 
 @admin.register(Invoice)

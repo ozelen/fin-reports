@@ -27,6 +27,8 @@ served together via **Docker Compose**.
 - Invoicing: clients, issuer profile, draft→issued registry (immutable once issued),
   working-days hour advisor (`8 × Mon–Fri`), bank-account requisites snapshotted onto
   each invoice, XLSX/PDF generation, and import of existing `.xlsx` invoices.
+- Documents registry: per-client files (agreements, orders, offers) and personal files
+  (tax declarations, certificates), with upload/download and filters.
 - JWT authentication. A single superuser is seeded from environment variables.
 
 ### The shared "criteria" concept

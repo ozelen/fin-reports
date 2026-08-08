@@ -32,6 +32,7 @@ from . import invoicing
 from .models import (
     Account,
     Client,
+    Document,
     Folder,
     Invoice,
     IssuerProfile,
@@ -48,6 +49,7 @@ from .serializers import (
     AiClassifySerializer,
     BulkTagSerializer,
     ClientSerializer,
+    DocumentSerializer,
     FolderSerializer,
     FolderTransactionsSerializer,
     InvoiceSerializer,
@@ -429,6 +431,50 @@ class ClientViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+
+
+class DocumentViewSet(viewsets.ModelViewSet):
+    serializer_class = DocumentSerializer
+    parser_classes = [MultiPartParser, FormParser]
+    filterset_fields = ["kind", "client"]
+    search_fields = ["title", "original_filename", "notes"]
+    ordering_fields = ["document_date", "created_at", "title", "kind"]
+    ordering = ["-document_date", "-created_at"]
+
+    def get_queryset(self):
+        qs = Document.objects.filter(owner=self.request.user).select_related("client")
+        scope = self.request.query_params.get("scope")
+        if scope == "personal":
+            qs = qs.filter(client__isnull=True)
+        elif scope == "client":
+            qs = qs.filter(client__isnull=False)
+        return qs
+
+    def perform_create(self, serializer):
+        file_obj = self.request.FILES.get("file")
+        if not file_obj:
+            raise ValidationError({"file": "File is required."})
+        title = serializer.validated_data.get("title") or Path(file_obj.name).stem
+        serializer.save(
+            owner=self.request.user,
+            title=title,
+            original_filename=file_obj.name,
+        )
+
+    def perform_update(self, serializer):
+        file_obj = self.request.FILES.get("file")
+        extras = {}
+        if file_obj:
+            extras["original_filename"] = file_obj.name
+        serializer.save(**extras)
+
+    @action(detail=True, methods=["get"])
+    def download(self, request, pk=None):
+        doc = self.get_object()
+        if not doc.file:
+            raise ValidationError({"detail": "No file on this document."})
+        filename = doc.original_filename or Path(doc.file.name).name
+        return FileResponse(doc.file.open("rb"), as_attachment=True, filename=filename)
 
 
 class InvoiceViewSet(viewsets.ModelViewSet):
@@ -930,6 +976,7 @@ BACKUP_MODELS = [
     Account,
     IssuerProfile,
     Client,
+    Document,
     Tag,
     Rule,
     Upload,
@@ -949,6 +996,7 @@ class BackupExportView(APIView):
             Account.objects.filter(owner=user),
             IssuerProfile.objects.filter(owner=user),
             Client.objects.filter(owner=user),
+            Document.objects.filter(owner=user),
             Tag.objects.filter(owner=user),
             Rule.objects.filter(owner=user),
             Upload.objects.filter(owner=user),
@@ -999,6 +1047,7 @@ class BackupImportView(APIView):
                 Transaction.objects.filter(owner=user).delete()
                 Upload.objects.filter(owner=user).delete()
                 Tag.objects.filter(owner=user).delete()
+                Document.objects.filter(owner=user).delete()
                 Client.objects.filter(owner=user).delete()
                 IssuerProfile.objects.filter(owner=user).delete()
                 Account.objects.filter(owner=user).delete()

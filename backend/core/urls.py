@@ -8,6 +8,7 @@ from .views import (
     BackupExportView,
     BackupImportView,
     ClientViewSet,
+    DocumentViewSet,
     FolderViewSet,
     InvoiceViewSet,
     IssuerProfileView,
@@ -26,6 +27,7 @@ router.register("tags", TagViewSet, basename="tag")
 router.register("rules", RuleViewSet, basename="rule")
 router.register("ai", AiViewSet, basename="ai")
 router.register("clients", ClientViewSet, basename="client")
+router.register("documents", DocumentViewSet, basename="document")
 router.register("invoices", InvoiceViewSet, basename="invoice")
 
 urlpatterns = [

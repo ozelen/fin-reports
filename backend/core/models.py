@@ -431,3 +431,52 @@ class Invoice(models.Model):
         self.net_amount = net
         self.vat_amount = vat
         self.total_amount = net + vat
+
+
+class Document(models.Model):
+    """File registry: per-client (agreements, orders) or personal (tax, certificates)."""
+
+    KIND_AGREEMENT = "agreement"
+    KIND_ORDER = "order"
+    KIND_OFFER = "offer"
+    KIND_TAX_DECLARATION = "tax_declaration"
+    KIND_TAX_CERTIFICATE = "tax_certificate"
+    KIND_OTHER = "other"
+    KIND_CHOICES = [
+        (KIND_AGREEMENT, "Agreement"),
+        (KIND_ORDER, "Order"),
+        (KIND_OFFER, "Offer"),
+        (KIND_TAX_DECLARATION, "Tax declaration"),
+        (KIND_TAX_CERTIFICATE, "Tax certificate"),
+        (KIND_OTHER, "Other"),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="documents"
+    )
+    client = models.ForeignKey(
+        Client,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="documents",
+        help_text="Leave empty for personal documents (tax, certificates, etc.).",
+    )
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=KIND_OTHER)
+    title = models.CharField(max_length=255)
+    document_date = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    original_filename = models.CharField(max_length=255, blank=True)
+    file = models.FileField(upload_to="documents/")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-document_date", "-created_at"]
+        indexes = [
+            models.Index(fields=["owner", "kind"]),
+            models.Index(fields=["owner", "client"]),
+        ]
+
+    def __str__(self):
+        scope = self.client.name if self.client_id else "Personal"
+        return f"{scope}: {self.title}"

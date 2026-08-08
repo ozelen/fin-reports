@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     Account,
     Client,
+    Document,
     Folder,
     Invoice,
     IssuerProfile,
@@ -90,6 +91,51 @@ class ClientSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "created_at"]
+
+
+class DocumentSerializer(serializers.ModelSerializer):
+    client = OwnerScopedPKField(model=Client, required=False, allow_null=True)
+    client_label = serializers.CharField(source="client.name", read_only=True)
+    kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Document
+        fields = [
+            "id",
+            "client",
+            "client_label",
+            "kind",
+            "kind_label",
+            "title",
+            "document_date",
+            "notes",
+            "original_filename",
+            "file",
+            "file_url",
+            "created_at",
+        ]
+        read_only_fields = ["id", "original_filename", "file_url", "created_at"]
+        extra_kwargs = {
+            "file": {"required": False},
+            "notes": {"required": False, "allow_blank": True},
+            "document_date": {"required": False, "allow_null": True},
+        }
+
+    def get_file_url(self, obj):
+        if not obj.file:
+            return None
+        request = self.context.get("request")
+        url = obj.file.url
+        return request.build_absolute_uri(url) if request else url
+
+    def to_internal_value(self, data):
+        # Multipart forms send client="" for personal docs.
+        if hasattr(data, "copy"):
+            data = data.copy()
+            if data.get("client") in ("", None):
+                data["client"] = None
+        return super().to_internal_value(data)
 
 
 class InvoiceSerializer(serializers.ModelSerializer):
