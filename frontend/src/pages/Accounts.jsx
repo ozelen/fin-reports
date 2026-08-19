@@ -30,11 +30,16 @@ const BLANK = {
   correspondent_bic: "",
   bank_address: "",
   currency: "EUR",
+  group: "family",
   is_default: false,
   is_invoice_default: false,
 };
 
 const CURRENCIES = ["EUR", "USD", "GBP", "PLN", "CHF"];
+const GROUPS = [
+  { value: "family", label: "Family" },
+  { value: "personal", label: "Personal" },
+];
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState([]);
@@ -67,6 +72,7 @@ export default function Accounts() {
       correspondent_bic: account.correspondent_bic || "",
       bank_address: account.bank_address || "",
       currency: account.currency || "EUR",
+      group: account.group || "family",
       is_default: account.is_default,
       is_invoice_default: account.is_invoice_default,
     });
@@ -100,36 +106,52 @@ export default function Accounts() {
         </Button>
       </Stack>
 
-      <Stack spacing={1}>
-        {accounts.map((a) => (
-          <Paper
-            key={a.id}
-            variant="outlined"
-            sx={{ p: 1.5, display: "flex", alignItems: "center", gap: 2 }}
-          >
-            <AccountBalanceIcon color="action" />
-            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                <Typography sx={{ fontWeight: 600 }}>{a.name}</Typography>
-                {a.is_default && <Chip size="small" color="primary" label="Upload default" />}
-                {a.is_invoice_default && (
-                  <Chip size="small" color="secondary" label="Invoice default" />
-                )}
-                <Chip size="small" variant="outlined" label={a.currency} />
-              </Stack>
-              <Typography variant="body2" color="text.secondary">
-                {[a.bank, a.iban, a.bic && `BIC ${a.bic}`].filter(Boolean).join(" · ") || "—"}
+      <Stack spacing={2}>
+        {GROUPS.map((g) => {
+          const items = accounts.filter((a) => a.group === g.value);
+          if (accounts.length > 0 && items.length === 0) return null;
+          return (
+            <Box key={g.value}>
+              <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+                {g.label}
               </Typography>
+              <Stack spacing={1}>
+                {items.map((a) => (
+                  <Paper
+                    key={a.id}
+                    variant="outlined"
+                    sx={{ p: 1.5, display: "flex", alignItems: "center", gap: 2 }}
+                  >
+                    <AccountBalanceIcon color="action" />
+                    <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                        <Typography sx={{ fontWeight: 600 }}>{a.name}</Typography>
+                        {a.is_default && (
+                          <Chip size="small" color="primary" label="Upload default" />
+                        )}
+                        {a.is_invoice_default && (
+                          <Chip size="small" color="secondary" label="Invoice default" />
+                        )}
+                        <Chip size="small" variant="outlined" label={a.currency} />
+                      </Stack>
+                      <Typography variant="body2" color="text.secondary">
+                        {[a.bank, a.iban, a.bic && `BIC ${a.bic}`].filter(Boolean).join(" · ") ||
+                          "—"}
+                      </Typography>
+                    </Box>
+                    <Chip size="small" variant="outlined" label={`${a.transaction_count} tx`} />
+                    <IconButton size="small" onClick={() => openEdit(a)}>
+                      <EditIcon fontSize="small" />
+                    </IconButton>
+                    <IconButton size="small" color="error" onClick={() => remove(a)}>
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Paper>
+                ))}
+              </Stack>
             </Box>
-            <Chip size="small" variant="outlined" label={`${a.transaction_count} tx`} />
-            <IconButton size="small" onClick={() => openEdit(a)}>
-              <EditIcon fontSize="small" />
-            </IconButton>
-            <IconButton size="small" color="error" onClick={() => remove(a)}>
-              <DeleteIcon fontSize="small" />
-            </IconButton>
-          </Paper>
-        ))}
+          );
+        })}
         {accounts.length === 0 && (
           <Typography color="text.secondary">No accounts yet.</Typography>
         )}
@@ -180,6 +202,19 @@ export default function Accounts() {
               multiline
               minRows={2}
             />
+            <TextField
+              select
+              label="Group"
+              value={form.group}
+              onChange={(e) => setForm({ ...form, group: e.target.value })}
+              fullWidth
+            >
+              {GROUPS.map((g) => (
+                <MenuItem key={g.value} value={g.value}>
+                  {g.label}
+                </MenuItem>
+              ))}
+            </TextField>
             <TextField
               select
               label="Currency"

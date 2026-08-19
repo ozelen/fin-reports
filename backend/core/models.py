@@ -3,6 +3,13 @@ from django.db import models
 
 
 class Account(models.Model):
+    GROUP_FAMILY = "family"
+    GROUP_PERSONAL = "personal"
+    GROUP_CHOICES = [
+        (GROUP_FAMILY, "Family"),
+        (GROUP_PERSONAL, "Personal"),
+    ]
+
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="accounts"
     )
@@ -13,12 +20,15 @@ class Account(models.Model):
     correspondent_bic = models.CharField(max_length=20, blank=True)
     bank_address = models.CharField(max_length=255, blank=True)
     currency = models.CharField(max_length=8, default="EUR")
+    group = models.CharField(
+        max_length=20, choices=GROUP_CHOICES, default=GROUP_FAMILY
+    )
     is_default = models.BooleanField(default=False)
     is_invoice_default = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["group", "name"]
         constraints = [
             models.UniqueConstraint(fields=["owner", "name"], name="uniq_owner_account")
         ]
@@ -480,3 +490,105 @@ class Document(models.Model):
     def __str__(self):
         scope = self.client.name if self.client_id else "Personal"
         return f"{scope}: {self.title}"
+
+
+class Receipt(models.Model):
+    """Incoming receipt/invoice photo or PDF, optionally linked to a bank tx later."""
+
+    KIND_RECEIPT = "receipt"
+    KIND_INVOICE = "invoice"
+    KIND_OTHER = "other"
+    KIND_CHOICES = [
+        (KIND_RECEIPT, "Receipt"),
+        (KIND_INVOICE, "Invoice"),
+        (KIND_OTHER, "Other"),
+    ]
+
+    SOURCE_TELEGRAM = "telegram"
+    SOURCE_WEB = "web"
+    SOURCE_CHOICES = [
+        (SOURCE_TELEGRAM, "Telegram"),
+        (SOURCE_WEB, "Web"),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="receipts"
+    )
+    transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="receipts",
+        help_text="Set once the matching bank transaction is known.",
+    )
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=KIND_RECEIPT)
+    merchant = models.CharField(max_length=255, blank=True)
+    amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=8, default="EUR")
+    document_date = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+    original_filename = models.CharField(max_length=255, blank=True)
+    mime_type = models.CharField(max_length=100, blank=True)
+    file = models.FileField(upload_to="receipts/")
+    extracted = models.JSONField(default=dict, blank=True)
+    source = models.CharField(
+        max_length=20, choices=SOURCE_CHOICES, default=SOURCE_TELEGRAM
+    )
+    telegram_file_id = models.CharField(max_length=128, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["owner", "transaction"]),
+            models.Index(fields=["owner", "document_date"]),
+        ]
+
+    def __str__(self):
+        label = self.merchant or self.original_filename or f"Receipt {self.pk}"
+        return label
+
+
+class PurchaseItem(models.Model):
+    """One line from a parsed receipt/invoice, for spend analysis."""
+
+    receipt = models.ForeignKey(
+        Receipt, on_delete=models.CASCADE, related_name="items"
+    )
+    name = models.CharField(max_length=255)
+    quantity = models.DecimalField(max_digits=12, decimal_places=2, default=1)
+    unit_price = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    amount = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    category = models.CharField(max_length=80, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["id"]
+
+    def __str__(self):
+        return self.name
+
+
+class TelegramLink(models.Model):
+    """Maps a Telegram user to the app owner and stores recent chat turns."""
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="telegram_links",
+    )
+    telegram_user_id = models.BigIntegerField(unique=True)
+    chat_id = models.BigIntegerField()
+    messages = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["telegram_user_id"])]
+
+    def __str__(self):
+        return f"tg:{self.telegram_user_id} → {self.owner}"

@@ -29,6 +29,7 @@ from .export import build_workbook
 from .filters import TransactionFilter
 from .folders import descendants, folder_transaction_ids, own_transaction_ids, subtree
 from . import invoicing
+from .receipts import attach_new_transactions
 from .models import (
     Account,
     Client,
@@ -36,6 +37,8 @@ from .models import (
     Folder,
     Invoice,
     IssuerProfile,
+    PurchaseItem,
+    Receipt,
     Rule,
     Tag,
     Transaction,
@@ -139,11 +142,15 @@ class UploadViewSet(
         rule_result = apply_rules(
             request.user, Transaction.objects.filter(upload=upload)
         )
+        receipts_attached = attach_new_transactions(
+            request.user, Transaction.objects.filter(upload=upload)
+        )
 
         serializer = self.get_serializer(upload)
         data = serializer.data
         data["skipped_duplicates"] = upload.row_count - upload.imported_count
         data["rule_assignments"] = rule_result["assignments_created"]
+        data["receipts_attached"] = receipts_attached
         return Response(data, status=status.HTTP_201_CREATED)
 
 
@@ -381,7 +388,11 @@ class AccountViewSet(viewsets.ModelViewSet):
     serializer_class = AccountSerializer
 
     def get_queryset(self):
-        return Account.objects.filter(owner=self.request.user)
+        qs = Account.objects.filter(owner=self.request.user)
+        group = self.request.query_params.get("group")
+        if group:
+            qs = qs.filter(group=group)
+        return qs
 
     def perform_create(self, serializer):
         account = serializer.save(owner=self.request.user)
@@ -984,6 +995,8 @@ BACKUP_MODELS = [
     TransactionTag,
     Folder,
     Invoice,
+    Receipt,
+    PurchaseItem,
 ]
 
 
@@ -1004,6 +1017,8 @@ class BackupExportView(APIView):
             TransactionTag.objects.filter(transaction__owner=user),
             Folder.objects.filter(owner=user),
             Invoice.objects.filter(owner=user),
+            Receipt.objects.filter(owner=user),
+            PurchaseItem.objects.filter(receipt__owner=user),
         ]
         objects = [obj for qs in querysets for obj in qs]
         data = dj_serializers.serialize("json", objects, indent=2)
@@ -1041,6 +1056,8 @@ class BackupImportView(APIView):
         try:
             with db_transaction.atomic():
                 # Deleting transactions/uploads cascades their tag links.
+                PurchaseItem.objects.filter(receipt__owner=user).delete()
+                Receipt.objects.filter(owner=user).delete()
                 Invoice.objects.filter(owner=user).delete()
                 Folder.objects.filter(owner=user).delete()
                 Rule.objects.filter(owner=user).delete()

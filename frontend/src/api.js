@@ -30,28 +30,39 @@ api.interceptors.request.use((config) => {
 
 let refreshing = null;
 
+function forceLogin() {
+  tokenStore.clear();
+  if (window.location.pathname !== "/login") {
+    window.location.assign("/login");
+  }
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    const original = error.config;
+    const original = error.config || {};
     const status = error.response?.status;
-    if (status === 401 && !original._retry && tokenStore.refresh) {
+    const url = String(original.url || "");
+    const isAuthCall = url.includes("/auth/token/");
+
+    if (status === 401 && !isAuthCall && !original._retry) {
       original._retry = true;
-      try {
-        refreshing =
-          refreshing ||
-          axios.post("/api/auth/token/refresh/", { refresh: tokenStore.refresh });
-        const { data } = await refreshing;
-        refreshing = null;
-        tokenStore.set({ access: data.access });
-        original.headers.Authorization = `Bearer ${data.access}`;
-        return api(original);
-      } catch (e) {
-        refreshing = null;
-        tokenStore.clear();
-        window.location.assign("/login");
-        return Promise.reject(e);
+      if (tokenStore.refresh) {
+        try {
+          refreshing =
+            refreshing ||
+            axios.post("/api/auth/token/refresh/", { refresh: tokenStore.refresh });
+          const { data } = await refreshing;
+          refreshing = null;
+          tokenStore.set({ access: data.access });
+          original.headers = original.headers || {};
+          original.headers.Authorization = `Bearer ${data.access}`;
+          return api(original);
+        } catch {
+          refreshing = null;
+        }
       }
+      forceLogin();
     }
     return Promise.reject(error);
   },

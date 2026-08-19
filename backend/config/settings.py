@@ -135,6 +135,15 @@ CORS_ALLOWED_ORIGINS = [
 # Max upload size handled in-memory before spooling to disk (2.5MB default is fine).
 DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
 
-# --- OpenAI (transaction classification) ---
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+# --- Gemini (transaction classification + Telegram agent) ---
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_OPENAI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# --- Telegram bot (polling; leave token blank to disable) ---
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_ALLOWED_USER_IDS = [
+    int(x.strip())
+    for x in os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "").split(",")
+    if x.strip().isdigit()
+]

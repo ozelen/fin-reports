@@ -22,7 +22,7 @@ served together via **Docker Compose**.
 - Hierarchical smart folders: a folder can nest under another and auto-includes
   transactions matching its tags and/or a saved filter, plus manual include/exclude.
   Parent folders roll up all descendants for totals and export.
-- AI classification (OpenAI): suggest tags for untagged transactions; review and apply.
+- AI classification (Gemini): suggest tags for untagged transactions; review and apply.
 - Export any folder to `.xlsx` with totals (income, expenses, or both), recursively.
 - Invoicing: clients, issuer profile, draft→issued registry (immutable once issued),
   working-days hour advisor (`8 × Mon–Fri`), bank-account requisites snapshotted onto
@@ -30,6 +30,7 @@ served together via **Docker Compose**.
 - Documents registry: per-client files (agreements, orders, offers) and personal files
   (tax declarations, certificates), with upload/download and filters.
 - JWT authentication. A single superuser is seeded from environment variables.
+- Telegram finance agent: chat about transactions, drop receipt/invoice photos or PDFs. Files are stored as receipts and attached to a bank transaction when one matches (or later, on statement import).
 
 ### The shared "criteria" concept
 
@@ -51,16 +52,30 @@ Then open <http://localhost:8080> and log in with the seeded superuser
 
 Django admin is available at <http://localhost:8080/admin/>.
 
+### Telegram bot
+
+1. Put `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY` in `.env`.
+2. `docker compose up --build`, then message the bot. If `TELEGRAM_ALLOWED_USER_IDS`
+   is empty, it replies with your numeric Telegram user id.
+3. Set `TELEGRAM_ALLOWED_USER_IDS` to that id and restart: `docker compose restart bot`.
+
+Receipt photos are sent to Gemini for extraction (merchant, totals, and line items).
+PDFs are stored as-is (no OCR). Unmatched receipts attach automatically when a later
+statement import has exactly one amount+date hit (merchant name breaks ties).
+
 ## Architecture
 
 ```
 web (React/MUI, nginx)  ──/api──▶  api (Django/DRF, gunicorn)  ──▶  db (Postgres)
+bot (Telegram long-poll)  ──▶  db + media, Gemini, api.telegram.org
 ```
 
 - `web` serves the built SPA and reverse-proxies `/api`, `/admin`, `/static`,
   `/media` to the `api` service — so everything is one origin.
 - `api` runs migrations, collects static, and seeds the superuser on boot
   (see `backend/entrypoint.sh`).
+- `bot` long-polls Telegram (no public webhook). Needs `TELEGRAM_BOT_TOKEN` and
+  `TELEGRAM_ALLOWED_USER_IDS`. Chat and receipt OCR need `GEMINI_API_KEY`.
 - Uploaded files and generated exports live on the `media` volume.
 
 ## API overview
@@ -87,11 +102,13 @@ web (React/MUI, nginx)  ──/api──▶  api (Django/DRF, gunicorn)  ──�
 
 ### AI classification & privacy
 
-AI features are enabled only when `OPENAI_API_KEY` is set. When you run a
+AI features are enabled only when `GEMINI_API_KEY` is set. When you run a
 classification, the transaction `concept`, `counterparty`, and `amount` for the
-selected transactions plus your tag names/descriptions are sent to OpenAI
-(`OPENAI_MODEL`, default `gpt-4o-mini`). Suggestions are returned for review;
-nothing is written until you apply them. Leave `OPENAI_API_KEY` blank to disable.
+selected transactions plus your tag names/descriptions are sent to Gemini
+(`GEMINI_MODEL`, default `gemini-flash-latest`). Suggestions are returned for
+review; nothing is written until you apply them. The Telegram agent also sends
+chat text and receipt images to Gemini. Leave `GEMINI_API_KEY` blank to disable.
+On Gemini's free tier, prompts may be used to improve Google's models.
 
 ## Local development
 
@@ -119,5 +136,7 @@ npm run dev        # Vite dev server on :5173, proxies /api to :8000
   (e.g. matching Amazon order exports) without a migration on populated data.
 - The parser is a dispatcher keyed by extension (`core/parsing.py`); adding a new
   bank/format means adding one reader that returns a matrix — nothing else changes.
-- Multi-role access (a read-only accountant login) and attaching invoices/agreements
-  to transactions are intentionally deferred; both are additive to the current schema.
+- Multi-role access (a read-only accountant login) is intentionally deferred.
+- Incoming receipts attach to transactions via Telegram (and auto-match on
+  statement import). A receipts page in the web UI is not built yet; use admin
+  or ask the bot.

@@ -46,6 +46,7 @@ class AccountSerializer(serializers.ModelSerializer):
             "correspondent_bic",
             "bank_address",
             "currency",
+            "group",
             "is_default",
             "is_invoice_default",
             "transaction_count",

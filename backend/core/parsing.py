@@ -36,7 +36,7 @@ HEADER_TOKENS = (
 _TYPE_PREFIXES = (
     "recibo", "transferencia", "transf", "traspaso", "bizum", "pago", "pagos",
     "adeudo", "adeudos", "compra", "cargo", "abono", "ingreso", "nomina",
-    "liquidacion", "comision", "devolucion", "domiciliacion",
+    "liquidacion", "comision", "devolucion", "domiciliacion", "payment",
 )
 # Connectors after a type word ("Transferencia de Juan", "Bizum a Maria").
 _CONNECTORS = ("a favor de ", "de ", "a ", "para ", "from ", "to ")
@@ -258,10 +258,11 @@ def _map_columns(header: list[str]) -> dict:
         h = raw.lower()
         if not h:
             continue
-        if "valor" in h or "value date" in h:
+        if "valor" in h or "value date" in h or "completed date" in h:
             cols.setdefault("value_date", idx)
         elif (
             "fecha" in h
+            or "started date" in h
             or "date and time" in h
             or "date" in h
             or "дата" in h
@@ -305,8 +306,14 @@ def _map_columns(header: list[str]) -> dict:
             or "сумма операц" in h
         ):
             cols.setdefault("operation_amount", idx)
-        if "commission" in h or "коміс" in h or "комис" in h:
+        if "commission" in h or h == "fee" or "коміс" in h or "комис" in h:
             cols.setdefault("commission", idx)
+        if h == "type":
+            cols.setdefault("type", idx)
+        if h in ("state", "status"):
+            cols.setdefault("state", idx)
+        if h == "currency":
+            cols.setdefault("currency", idx)
         if "cashback" in h or "кешбек" in h or "кэшбек" in h:
             cols.setdefault("cashback", idx)
     # Last-resort amount: accept a lone "operation amount" if nothing else matched.
@@ -413,11 +420,19 @@ def parse(path: str, filename: str) -> dict:
         # Skip blank/separator/total rows.
         if op_date is None or amount is None:
             continue
+        state = _cell_str(col("state")).upper()
+        if state and state not in ("COMPLETED", "COMPLETE", "BOOKED", "POSTED"):
+            continue
         balance = parse_decimal(col("balance"))
         value_date = parse_date(col("value_date"))
 
-        # Optional enrichment columns (Monobank and similar).
+        # Optional enrichment columns (Monobank, Revolut, and similar).
         extras = {}
+        tx_type = _cell_str(col("type"))
+        if tx_type:
+            extras["type"] = tx_type
+        row_cur = _cell_str(col("currency")).upper()
+        currency = row_cur if row_cur in CURRENCIES else meta["currency"]
         mcc = _cell_str(col("mcc"))
         if mcc and mcc not in ("—", "-"):
             extras["mcc"] = mcc
@@ -442,7 +457,7 @@ def parse(path: str, filename: str) -> dict:
                 "counterparty": extract_counterparty(concept),
                 "amount": amount,
                 "balance": balance,
-                "currency": meta["currency"],
+                "currency": currency,
                 "metadata": extras,
                 "dedupe_hash": dedupe_hash(op_date, amount, concept, balance),
             }

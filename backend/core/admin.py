@@ -7,8 +7,11 @@ from .models import (
     Folder,
     Invoice,
     IssuerProfile,
+    PurchaseItem,
+    Receipt,
     Rule,
     Tag,
+    TelegramLink,
     Transaction,
     TransactionTag,
     Upload,
@@ -20,13 +23,14 @@ class AccountAdmin(admin.ModelAdmin):
     list_display = (
         "name",
         "bank",
+        "group",
         "currency",
         "is_default",
         "is_invoice_default",
         "owner",
         "created_at",
     )
-    list_filter = ("owner", "currency", "is_default", "is_invoice_default")
+    list_filter = ("owner", "group", "currency", "is_default", "is_invoice_default")
     search_fields = ("name", "bank", "iban", "bic")
 
 
@@ -144,3 +148,48 @@ class InvoiceAdmin(admin.ModelAdmin):
         "iban",
         "bic",
     )
+
+
+class PurchaseItemInline(admin.TabularInline):
+    model = PurchaseItem
+    extra = 0
+
+
+@admin.register(Receipt)
+class ReceiptAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "kind",
+        "merchant",
+        "amount",
+        "currency",
+        "document_date",
+        "transaction",
+        "source",
+        "owner",
+        "created_at",
+    )
+    list_filter = ("owner", "kind", "source", "currency")
+    search_fields = ("merchant", "original_filename", "notes")
+    autocomplete_fields = ("transaction",)
+    inlines = [PurchaseItemInline]
+
+
+@admin.register(PurchaseItem)
+class PurchaseItemAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "category",
+        "quantity",
+        "amount",
+        "receipt",
+        "created_at",
+    )
+    list_filter = ("category",)
+    search_fields = ("name", "category", "receipt__merchant")
+
+
+@admin.register(TelegramLink)
+class TelegramLinkAdmin(admin.ModelAdmin):
+    list_display = ("telegram_user_id", "chat_id", "owner", "updated_at")
+    list_filter = ("owner",)

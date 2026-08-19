@@ -27,6 +27,20 @@ services:
       db:
         condition: service_healthy
 
+  bot:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+    volumes:
+      - media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python manage.py run_telegram_bot
+
   web:
     build: ./frontend
     restart: unless-stopped

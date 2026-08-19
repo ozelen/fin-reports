@@ -8,6 +8,12 @@ done
 echo "Postgres is up."
 
 python manage.py migrate --noinput
+
+# Bot (and other one-off commands) reuse this image: skip gunicorn.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 python manage.py collectstatic --noinput
 python manage.py seed_superuser
 
