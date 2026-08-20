@@ -59,6 +59,7 @@ export default function Dashboard() {
     untagged: null,
     totals: null,
     mixed: false,
+    converted: false,
     currencies: [],
   });
   const [series, setSeries] = useState([]);
@@ -100,7 +101,7 @@ export default function Dashboard() {
     load();
   }, [load]);
 
-  const { tags, untagged, totals, mixed, currencies: dataCurrencies } = data;
+  const { tags, untagged, totals, mixed, converted, currencies: dataCurrencies } = data;
   const moneyCode = totals?.currency || "EUR";
 
   const timeline = useMemo(() => {
@@ -224,11 +225,19 @@ export default function Dashboard() {
         </Stack>
       </Stack>
 
-      {mixed && (
+      {converted && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Totals in EUR using NBU daily rates
+          {(dataCurrencies || []).length
+            ? ` · native ${(dataCurrencies || []).join(", ")}`
+            : ""}
+          .
+        </Alert>
+      )}
+      {mixed && !converted && totals?.income == null && (
         <Alert severity="warning" sx={{ mb: 2 }}>
-          Mixed currencies ({(dataCurrencies || []).join(", ")}) — pick an Account
-          filter before reading totals or the PnL chart. UAH and EUR must not be
-          summed together.
+          Mixed currencies ({(dataCurrencies || []).join(", ")}) — rates were
+          unavailable, so totals are hidden.
         </Alert>
       )}
 
@@ -291,17 +300,17 @@ export default function Dashboard() {
       <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap", mb: 2 }} useFlexGap>
         <Kpi
           label="Income"
-          value={mixed || totals?.income == null ? "—" : currency(totals.income, moneyCode)}
+          value={totals?.income == null ? "—" : currency(totals.income, moneyCode)}
           color="success.main"
         />
         <Kpi
           label="Expenses"
-          value={mixed || totals?.expense == null ? "—" : currency(totals.expense, moneyCode)}
+          value={totals?.expense == null ? "—" : currency(totals.expense, moneyCode)}
           color="error.main"
         />
         <Kpi
           label="Net"
-          value={mixed || totals?.net == null ? "—" : currency(totals.net, moneyCode)}
+          value={totals?.net == null ? "—" : currency(totals.net, moneyCode)}
           color="text.primary"
         />
         <Kpi label="Transactions" value={totals?.count ?? 0} />
@@ -369,7 +378,12 @@ export default function Dashboard() {
             />
           </ChartCard>
 
-          <TagTable tags={tags} untagged={untagged} currencyCode={moneyCode} />
+          <TagTable
+            tags={tags}
+            untagged={untagged}
+            totals={totals}
+            currencyCode={moneyCode}
+          />
         </Stack>
       )}
     </Box>
@@ -465,7 +479,7 @@ function ChartCard({ title, children, empty, action }) {
   );
 }
 
-function TagTable({ tags, untagged, currencyCode = "EUR" }) {
+function TagTable({ tags, untagged, totals, currencyCode = "EUR" }) {
   const rows = [...tags].sort((a, b) => a.net - b.net);
   const cell = { padding: "6px 12px", fontSize: 14 };
   const head = { ...cell, fontWeight: 600, color: "rgba(0,0,0,0.6)", textAlign: "right" };
@@ -476,8 +490,11 @@ function TagTable({ tags, untagged, currencyCode = "EUR" }) {
   );
   return (
     <Paper variant="outlined" sx={{ p: 2, overflowX: "auto" }}>
-      <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+      <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 0.5 }}>
         Breakdown by tag
+      </Typography>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+        Each payment is counted once (split across its tags). Period totals are the ledger.
       </Typography>
       <Box component="table" sx={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
@@ -520,6 +537,17 @@ function TagTable({ tags, untagged, currencyCode = "EUR" }) {
               {money(untagged.income, "#2e7d32")}
               {money(untagged.expense, "#d32f2f")}
               {money(untagged.net)}
+            </Box>
+          )}
+          {totals && (
+            <Box component="tr" sx={{ borderTop: "2px solid", borderColor: "divider" }}>
+              <td style={{ ...cell, fontWeight: 700 }}>Period</td>
+              <td style={{ ...cell, textAlign: "right", fontWeight: 700 }}>
+                {totals.count ?? 0}
+              </td>
+              {money(totals.income || 0, "#2e7d32")}
+              {money(totals.expense || 0, "#d32f2f")}
+              {money(totals.net || 0)}
             </Box>
           )}
         </tbody>

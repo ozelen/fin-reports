@@ -9,17 +9,27 @@ class Account(models.Model):
         (GROUP_FAMILY, "Family"),
         (GROUP_PERSONAL, "Personal"),
     ]
+    KIND_BANK = "bank"
+    KIND_CASH = "cash"
+    KIND_DEBT = "debt"
+    KIND_CHOICES = [
+        (KIND_BANK, "Bank"),
+        (KIND_CASH, "Cash"),
+        (KIND_DEBT, "Debt"),
+    ]
 
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="accounts"
     )
     name = models.CharField(max_length=120)
+    kind = models.CharField(max_length=8, choices=KIND_CHOICES, default=KIND_BANK)
     bank = models.CharField(max_length=120, blank=True)
     iban = models.CharField(max_length=34, blank=True)
     bic = models.CharField(max_length=20, blank=True)
     correspondent_bic = models.CharField(max_length=20, blank=True)
     bank_address = models.CharField(max_length=255, blank=True)
     currency = models.CharField(max_length=8, default="EUR")
+    balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     group = models.CharField(
         max_length=20, choices=GROUP_CHOICES, default=GROUP_FAMILY
     )
@@ -28,7 +38,7 @@ class Account(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["group", "name"]
+        ordering = ["kind", "group", "name"]
         constraints = [
             models.UniqueConstraint(fields=["owner", "name"], name="uniq_owner_account")
         ]
@@ -96,6 +106,69 @@ class Tag(models.Model):
     def __str__(self):
         return self.name
 
+    @classmethod
+    def resolve(cls, user, names) -> list["Tag"]:
+        """Existing tags by case-insensitive name, created if missing."""
+        tags = []
+        seen: set[str] = set()
+        for raw in names or []:
+            name = " ".join(str(raw).split())[:80]
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            tag = cls.objects.filter(owner=user, name__iexact=name).first()
+            if tag is None:
+                tag = cls.objects.create(owner=user, name=name)
+            tags.append(tag)
+        return tags
+
+
+class Budget(models.Model):
+    PERIOD_WEEK = "week"
+    PERIOD_MONTH = "month"
+    PERIOD_YEAR = "year"
+    PERIOD_CHOICES = [
+        (PERIOD_WEEK, "Week"),
+        (PERIOD_MONTH, "Month"),
+        (PERIOD_YEAR, "Year"),
+    ]
+    KIND_SPEND = "spend"
+    KIND_INCOME = "income"
+    KIND_SAVE = "save"
+    KIND_CHOICES = [
+        (KIND_SPEND, "Spend"),
+        (KIND_INCOME, "Income"),
+        (KIND_SAVE, "Save"),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="budgets"
+    )
+    tag = models.ForeignKey(Tag, on_delete=models.CASCADE, related_name="budgets")
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="budgets",
+    )
+    period = models.CharField(
+        max_length=8, choices=PERIOD_CHOICES, default=PERIOD_MONTH
+    )
+    kind = models.CharField(max_length=8, choices=KIND_CHOICES, default=KIND_SPEND)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["kind", "period", "id"]
+
+    def __str__(self):
+        return f"{self.kind} {self.tag} {self.period} {self.amount}"
+
 
 class Rule(models.Model):
     owner = models.ForeignKey(
@@ -125,7 +198,12 @@ class Transaction(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="transactions"
     )
     upload = models.ForeignKey(
-        Upload, on_delete=models.CASCADE, related_name="transactions"
+        Upload,
+        on_delete=models.CASCADE,
+        related_name="transactions",
+        null=True,
+        blank=True,
+        help_text="Null until a bank statement row is absorbed.",
     )
     account = models.ForeignKey(
         Account,
@@ -164,8 +242,31 @@ class Transaction(models.Model):
     def kind(self):
         return "income" if self.amount >= 0 else "expense"
 
+    @property
+    def pending(self):
+        return self.upload_id is None and not (self.metadata or {}).get("transfer")
+
     def __str__(self):
         return f"{self.operation_date} {self.amount} {self.concept[:40]}"
+
+
+class FxRate(models.Model):
+    """NBU daily quote: UAH per 1 unit of `currency`. EUR is stored; UAH is not."""
+
+    date = models.DateField(db_index=True)
+    currency = models.CharField(max_length=8)
+    uah_per_unit = models.DecimalField(max_digits=18, decimal_places=8)
+
+    class Meta:
+        ordering = ["-date", "currency"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["date", "currency"], name="uniq_fx_date_currency"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.date} {self.currency} {self.uah_per_unit}"
 
 
 class TransactionTag(models.Model):
@@ -530,12 +631,20 @@ class Receipt(models.Model):
     notes = models.TextField(blank=True)
     original_filename = models.CharField(max_length=255, blank=True)
     mime_type = models.CharField(max_length=100, blank=True)
-    file = models.FileField(upload_to="receipts/")
+    file = models.FileField(upload_to="receipts/", blank=True)
     extracted = models.JSONField(default=dict, blank=True)
+    needs_parse = models.BooleanField(
+        default=False,
+        help_text="Vision parse queued (rate limit or album). Bot retries until done.",
+    )
     source = models.CharField(
         max_length=20, choices=SOURCE_CHOICES, default=SOURCE_TELEGRAM
     )
-    telegram_file_id = models.CharField(max_length=128, blank=True)
+    telegram_file_id = models.CharField(
+        max_length=128,
+        blank=True,
+        help_text="Telegram file_id. Bot API download URLs expire; this id does not.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -556,7 +665,20 @@ class PurchaseItem(models.Model):
     receipt = models.ForeignKey(
         Receipt, on_delete=models.CASCADE, related_name="items"
     )
-    name = models.CharField(max_length=255)
+    transaction = models.ForeignKey(
+        Transaction,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="purchase_items",
+    )
+    name = models.CharField(max_length=255, help_text="Printed OCR text.")
+    title = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Human label, e.g. 'beef mince' instead of 'BURGER M VACUN'.",
+    )
+    barcode = models.CharField(max_length=64, blank=True, db_index=True)
     quantity = models.DecimalField(max_digits=12, decimal_places=2, default=1)
     unit_price = models.DecimalField(
         max_digits=14, decimal_places=2, null=True, blank=True
@@ -565,13 +687,19 @@ class PurchaseItem(models.Model):
         max_digits=14, decimal_places=2, null=True, blank=True
     )
     category = models.CharField(max_length=80, blank=True, db_index=True)
+    tags = models.ManyToManyField(Tag, related_name="purchase_items", blank=True)
+    telegram_photo_file_id = models.CharField(max_length=128, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["id"]
 
     def __str__(self):
-        return self.name
+        return self.title or self.name
+
+    @property
+    def label(self) -> str:
+        return self.title or self.name
 
 
 class TelegramLink(models.Model):
@@ -585,6 +713,16 @@ class TelegramLink(models.Model):
     telegram_user_id = models.BigIntegerField(unique=True)
     chat_id = models.BigIntegerField()
     messages = models.JSONField(default=list, blank=True)
+    pending_item_id = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Next Telegram photo is stored as this purchase item's picture.",
+    )
+    pending_upload_id = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Statement waiting for the user to pick an account.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

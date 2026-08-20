@@ -21,7 +21,7 @@ import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
 import LockIcon from "@mui/icons-material/Lock";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
-import { Link as RouterLink } from "react-router-dom";
+import { Link as RouterLink, useOutletContext, useParams } from "react-router-dom";
 import api from "../api";
 
 const MONTHS = [
@@ -59,18 +59,6 @@ const blankInvoice = () => {
   };
 };
 
-const blankIssuer = {
-  legal_name: "",
-  trade_name: "",
-  vat_number: "",
-  address: "",
-  city: "",
-  country: "Spain",
-  phone: "",
-  email: "",
-  legal_form: "Private Entrepreneur | Autónomo",
-};
-
 function money(n, currency = "EUR") {
   if (n == null || n === "") return "—";
   return `${Number(n).toLocaleString("es-ES", {
@@ -80,6 +68,10 @@ function money(n, currency = "EUR") {
 }
 
 export default function Invoices() {
+  const { clientId } = useParams();
+  const { client: routeClient } = useOutletContext();
+  const lockedClientId = clientId ? Number(clientId) : null;
+
   const [invoices, setInvoices] = useState([]);
   const [clients, setClients] = useState([]);
   const [accounts, setAccounts] = useState([]);
@@ -91,16 +83,14 @@ export default function Invoices() {
   const [form, setForm] = useState(blankInvoice());
   const [advice, setAdvice] = useState(null);
 
-  const [issuerOpen, setIssuerOpen] = useState(false);
-  const [issuerForm, setIssuerForm] = useState(blankIssuer);
-
   const [importOpen, setImportOpen] = useState(false);
-  const [importClient, setImportClient] = useState("");
   const [importFile, setImportFile] = useState(null);
 
   const load = async () => {
     const [inv, cli, acc, iss] = await Promise.all([
-      api.get("/invoices/", { params: { page_size: 200 } }),
+      api.get("/invoices/", {
+        params: { page_size: 200, ...(lockedClientId ? { client: lockedClientId } : {}) },
+      }),
       api.get("/clients/", { params: { page_size: 200 } }),
       api.get("/accounts/", { params: { page_size: 200 } }),
       api.get("/issuer/"),
@@ -113,12 +103,15 @@ export default function Invoices() {
 
   useEffect(() => {
     load().catch((e) => setError(e.response?.data?.detail || e.message));
-  }, []);
+  }, [lockedClientId]);
 
   const invoiceAccounts = useMemo(
-    () => accounts.filter((a) => a.iban || a.is_invoice_default),
+    () => accounts.filter((a) => (a.kind || "bank") === "bank" && (a.iban || a.is_invoice_default)),
     [accounts]
   );
+
+  const lockedClient =
+    routeClient || clients.find((c) => c.id === lockedClientId) || null;
 
   const refreshAdvice = async (year, month, unitPrice) => {
     const { data } = await api.get("/invoices/advise/", {
@@ -131,7 +124,7 @@ export default function Invoices() {
   const openNewInvoice = async () => {
     setEditing(null);
     const base = blankInvoice();
-    const defaultClient = clients[0];
+    const defaultClient = routeClient || clients.find((c) => c.id === lockedClientId) || clients[0];
     const defaultAccount =
       accounts.find((a) => a.is_invoice_default) || accounts.find((a) => a.iban) || "";
     if (defaultClient) {
@@ -184,6 +177,7 @@ export default function Invoices() {
     setError("");
     const payload = {
       ...form,
+      client: form.client || lockedClientId,
       account: form.account || null,
       quantity: form.quantity,
       unit_price: form.unit_price,
@@ -231,22 +225,11 @@ export default function Invoices() {
     URL.revokeObjectURL(url);
   };
 
-  const saveIssuer = async () => {
-    const { data } = await api.put("/issuer/", issuerForm);
-    setIssuer(data);
-    setIssuerOpen(false);
-  };
-
-  const openIssuer = () => {
-    setIssuerForm({ ...blankIssuer, ...(issuer || {}) });
-    setIssuerOpen(true);
-  };
-
   const runImport = async () => {
-    if (!importFile || !importClient) return;
+    if (!importFile || !lockedClientId) return;
     const body = new FormData();
     body.append("file", importFile);
-    body.append("client", importClient);
+    body.append("client", lockedClientId);
     try {
       await api.post("/invoices/import_xlsx/", body);
       setImportOpen(false);
@@ -264,12 +247,8 @@ export default function Invoices() {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
-          Invoices
-        </Typography>
+      <Stack direction="row" justifyContent="flex-end" alignItems="center" sx={{ mb: 2 }}>
         <Stack direction="row" spacing={1}>
-          <Button onClick={openIssuer}>{issuer ? "Issuer profile" : "Set issuer"}</Button>
           <Button startIcon={<UploadFileIcon />} onClick={() => setImportOpen(true)}>
             Import XLSX
           </Button>
@@ -277,7 +256,7 @@ export default function Invoices() {
             variant="contained"
             startIcon={<AddIcon />}
             onClick={openNewInvoice}
-            disabled={clients.length === 0}
+            disabled={clients.length === 0 && !routeClient}
           >
             New invoice
           </Button>
@@ -285,8 +264,16 @@ export default function Invoices() {
       </Stack>
 
       {!issuer && (
-        <Alert severity="warning" sx={{ mb: 2 }} action={<Button onClick={openIssuer}>Set up</Button>}>
-          Issuer profile is required before issuing invoices.
+        <Alert
+          severity="warning"
+          sx={{ mb: 2 }}
+          action={
+            <Button component={RouterLink} to="/my/details" color="inherit">
+              My → Details
+            </Button>
+          }
+        >
+          Issuer profile is required before issuing invoices. Set it under My → Details.
         </Alert>
       )}
       {error && (
@@ -294,7 +281,7 @@ export default function Invoices() {
           {typeof error === "string" ? error : JSON.stringify(error)}
         </Alert>
       )}
-      {clients.length === 0 && (
+      {clients.length === 0 && !routeClient && (
         <Alert
           severity="info"
           sx={{ mb: 2 }}
@@ -324,7 +311,9 @@ export default function Invoices() {
                   icon={inv.is_issued ? <LockIcon /> : undefined}
                   label={inv.status}
                 />
-                <Chip size="small" variant="outlined" label={inv.client_label || inv.client_name} />
+                {!lockedClientId && (
+                  <Chip size="small" variant="outlined" label={inv.client_label || inv.client_name} />
+                )}
               </Stack>
               <Typography variant="body2" color="text.secondary">
                 {inv.description} · {inv.quantity}h × {inv.unit_price} · sale {inv.sale_date} ·
@@ -377,28 +366,30 @@ export default function Invoices() {
               </Alert>
             )}
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-              <TextField
-                select
-                label="Client"
-                value={form.client}
-                onChange={(e) => {
-                  const c = clients.find((x) => x.id === Number(e.target.value));
-                  setForm({
-                    ...form,
-                    client: e.target.value,
-                    description: c?.default_description || form.description,
-                    unit_price: c?.default_unit_price || form.unit_price,
-                    currency: c?.currency || form.currency,
-                  });
-                }}
-                fullWidth
-              >
-                {clients.map((c) => (
-                  <MenuItem key={c.id} value={c.id}>
-                    {c.name}
-                  </MenuItem>
-                ))}
-              </TextField>
+              {!lockedClientId && (
+                <TextField
+                  select
+                  label="Client"
+                  value={form.client}
+                  onChange={(e) => {
+                    const c = clients.find((x) => x.id === Number(e.target.value));
+                    setForm({
+                      ...form,
+                      client: e.target.value,
+                      description: c?.default_description || form.description,
+                      unit_price: c?.default_unit_price || form.unit_price,
+                      currency: c?.currency || form.currency,
+                    });
+                  }}
+                  fullWidth
+                >
+                  {clients.map((c) => (
+                    <MenuItem key={c.id} value={c.id}>
+                      {c.name}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              )}
               <TextField
                 select
                 label="Bank account"
@@ -517,47 +508,9 @@ export default function Invoices() {
           <Button
             variant="contained"
             onClick={saveInvoice}
-            disabled={!form.client || !form.quantity || !form.unit_price}
+            disabled={!(form.client || lockedClientId) || !form.quantity || !form.unit_price}
           >
             Save draft
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={issuerOpen} onClose={() => setIssuerOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Issuer profile</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} sx={{ mt: 1 }}>
-            {[
-              ["legal_name", "Legal name"],
-              ["vat_number", "VAT number"],
-              ["phone", "Phone"],
-              ["email", "Email"],
-              ["legal_form", "Legal form"],
-              ["address", "Address"],
-              ["city", "City"],
-              ["country", "Country"],
-            ].map(([key, label]) => (
-              <TextField
-                key={key}
-                label={label}
-                value={issuerForm[key] || ""}
-                onChange={(e) => setIssuerForm({ ...issuerForm, [key]: e.target.value })}
-                fullWidth
-                multiline={key === "address"}
-                minRows={key === "address" ? 2 : 1}
-              />
-            ))}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setIssuerOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={saveIssuer}
-            disabled={!issuerForm.legal_name.trim()}
-          >
-            Save
           </Button>
         </DialogActions>
       </Dialog>
@@ -566,19 +519,9 @@ export default function Invoices() {
         <DialogTitle>Import existing invoice (XLSX)</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField
-              select
-              label="Client"
-              value={importClient}
-              onChange={(e) => setImportClient(e.target.value)}
-              fullWidth
-            >
-              {clients.map((c) => (
-                <MenuItem key={c.id} value={c.id}>
-                  {c.name}
-                </MenuItem>
-              ))}
-            </TextField>
+            <Typography variant="body2" color="text.secondary">
+              Client: {lockedClient?.name || "—"}
+            </Typography>
             <Button variant="outlined" component="label">
               {importFile ? importFile.name : "Choose .xlsx"}
               <input
@@ -595,7 +538,7 @@ export default function Invoices() {
           <Button
             variant="contained"
             onClick={runImport}
-            disabled={!importFile || !importClient}
+            disabled={!importFile || !lockedClientId}
           >
             Import as issued
           </Button>

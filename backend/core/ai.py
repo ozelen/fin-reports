@@ -50,6 +50,10 @@ def user_message_for_ai_error(exc) -> str:
     low = text.lower()
     if "429" in text or "resource_exhausted" in low or "rate limit" in low:
         return "Gemini is rate-limiting right now. Try again in a minute."
+    if "503" in text or "unavailable" in low or "high demand" in low:
+        return "Gemini is busy right now. Try again in a minute."
+    if "thought_signature" in low:
+        return "Gemini tool-calling hiccup. The receipt is saved — send another message to continue."
     if "api key" in low or "unauthenticated" in low or "401" in text:
         return "Gemini API key was rejected. Check GEMINI_API_KEY."
     return f"Gemini error: {exc}"

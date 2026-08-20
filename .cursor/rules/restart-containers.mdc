@@ -1,0 +1,13 @@
+---
+description: Rebuild/restart Docker Compose after each backend or frontend change
+alwaysApply: true
+---
+
+# Restart containers after each iteration
+
+This app runs via Docker Compose. After any change that should be live (backend, bot, frontend, `.env`):
+
+1. `docker compose up -d --build` for the services that changed (`api`, `bot`, `web`). Skip `db` unless compose/db config changed.
+2. Env-only changes: `docker compose up -d <service>` (recreate). `restart` does not reload `.env`.
+3. Confirm with `docker compose logs --tail 20` on the service you touched (bot should show `Polling as @…`).
+4. Backend code changes: rebuild **both** `api` and `bot` (same image).

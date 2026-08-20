@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -26,6 +27,7 @@ import { DataGrid } from "@mui/x-data-grid";
 import api from "../api";
 import TagMultiSelect from "../components/TagMultiSelect";
 import { TagCell, TagEditorPopover } from "../components/TagCell";
+import ReceiptDialog from "../components/ReceiptDialog";
 
 const currency = (v, code) =>
   new Intl.NumberFormat("es-ES", {
@@ -44,6 +46,7 @@ const QUARTERS = [
 ];
 
 export default function Transactions() {
+  const [searchParams] = useSearchParams();
   const [rows, setRows] = useState([]);
   const [rowCount, setRowCount] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -55,14 +58,20 @@ export default function Transactions() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [counterparty, setCounterparty] = useState("");
   const [debouncedCounterparty, setDebouncedCounterparty] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  const [dateFrom, setDateFrom] = useState(() => searchParams.get("date_from") || "");
+  const [dateTo, setDateTo] = useState(() => searchParams.get("date_to") || "");
   const [quarter, setQuarter] = useState("");
   const [year, setYear] = useState("");
-  const [tagFilter, setTagFilter] = useState([]);
+  const [tagFilter, setTagFilter] = useState(() => {
+    const raw = searchParams.get("tags");
+    if (!raw) return [];
+    return raw.split(",").map(Number).filter(Boolean);
+  });
   const [source, setSource] = useState("");
   const [untagged, setUntagged] = useState(false);
-  const [accountFilter, setAccountFilter] = useState("");
+  const [accountFilter, setAccountFilter] = useState(
+    () => searchParams.get("account") || "",
+  );
 
   const [tags, setTags] = useState([]);
   const [accounts, setAccounts] = useState([]);
@@ -73,6 +82,7 @@ export default function Transactions() {
     count: 0,
     currency: "EUR",
     mixed: false,
+    converted: false,
     currencies: [],
   });
   const [selection, setSelection] = useState([]);
@@ -91,6 +101,7 @@ export default function Transactions() {
   const [aiSuggestions, setAiSuggestions] = useState([]);
 
   const [tagEditor, setTagEditor] = useState(null);
+  const [receiptId, setReceiptId] = useState(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 400);
@@ -224,7 +235,34 @@ export default function Transactions() {
 
   const columns = [
     { field: "operation_date", headerName: "Date", width: 110 },
-    { field: "concept", headerName: "Concept", flex: 1, minWidth: 260 },
+    {
+      field: "concept",
+      headerName: "Concept",
+      flex: 1,
+      minWidth: 260,
+      renderCell: (p) => {
+        const openReceipt = (e) => {
+          e.stopPropagation();
+          if (p.row.receipt_id) setReceiptId(p.row.receipt_id);
+        };
+        const stopRow = (e) => e.stopPropagation();
+        return (
+          <Stack direction="row" spacing={0.75} alignItems="center" sx={{ overflow: "hidden" }}>
+            {p.row.receipt_id && (
+              <Chip
+                size="small"
+                label={`(${p.row.item_count || 0} items)`}
+                color="warning"
+                variant="outlined"
+                onClick={openReceipt}
+                onMouseDown={stopRow}
+              />
+            )}
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{p.value}</span>
+          </Stack>
+        );
+      },
+    },
     { field: "counterparty", headerName: "Counterparty", width: 180 },
     {
       field: "account_label",
@@ -485,6 +523,14 @@ export default function Transactions() {
         onCreateAndAdd={createAndAddTagToRow}
       />
 
+      <ReceiptDialog
+        receiptId={receiptId}
+        allTags={tags}
+        onClose={() => setReceiptId(null)}
+        onSaved={load}
+        onTagsChanged={loadTags}
+      />
+
       {/* Add to folder */}
       <Dialog open={folderDialog} onClose={() => setFolderDialog(false)} fullWidth maxWidth="xs">
         <DialogTitle>Add {selection.length} to a folder</DialogTitle>
@@ -604,20 +650,28 @@ function SummaryCards({ summary }) {
         {label}
       </Typography>
       <Typography variant="h6" sx={{ color, fontWeight: 700 }}>
-        {summary.mixed || value == null ? "—" : currency(value, code)}
+        {value == null ? "—" : currency(value, code)}
       </Typography>
     </Paper>
   );
   return (
     <Stack spacing={1} sx={{ width: "100%" }}>
-      {summary.mixed && (
+      {summary.converted && (
+        <Alert severity="info">
+          Totals in EUR using NBU daily rates
+          {summary.currencies?.length
+            ? ` · native ${summary.currencies.map((c) => c.currency || c).join(", ")}`
+            : ""}
+          .
+        </Alert>
+      )}
+      {summary.mixed && !summary.converted && summary.income == null && (
         <Alert severity="warning">
           Mixed currencies
           {summary.currencies?.length
             ? ` (${summary.currencies.map((c) => c.currency || c).join(", ")})`
             : ""}
-          — pick an Account filter to see totals. Summing UAH + EUR as one number is
-          meaningless.
+          — rates were unavailable, so totals are hidden.
         </Alert>
       )}
       <Stack direction="row" spacing={2} sx={{ width: "100%" }}>

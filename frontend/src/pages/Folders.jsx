@@ -194,10 +194,7 @@ export default function Folders() {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
-          Folders
-        </Typography>
+      <Stack direction="row" justifyContent="flex-end" alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" useFlexGap>
         <Stack direction="row" spacing={2} alignItems="center">
           <TextField select size="small" label="Export totals" value={totals} onChange={(e) => setTotals(e.target.value)} sx={{ minWidth: 160 }}>
             <MenuItem value="both">Income + Expenses</MenuItem>

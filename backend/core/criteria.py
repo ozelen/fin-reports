@@ -41,6 +41,24 @@ def quarter_range(quarter, year=None, today: dt.date | None = None):
     return _quarter_bounds(y, q)
 
 
+def period_range(period, today: dt.date | None = None):
+    """Window for a recurring budget: week (Mon–Sun), calendar month, or year."""
+    today = today or dt.date.today()
+    if period == "week":
+        start = today - dt.timedelta(days=today.weekday())
+        return start, start + dt.timedelta(days=6)
+    if period == "year":
+        return dt.date(today.year, 1, 1), dt.date(today.year, 12, 31)
+    if period == "month":
+        start = today.replace(day=1)
+        if start.month == 12:
+            end = dt.date(start.year, 12, 31)
+        else:
+            end = dt.date(start.year, start.month + 1, 1) - dt.timedelta(days=1)
+        return start, end
+    return None
+
+
 def apply_criteria(queryset, criteria: dict | None):
     """Filter a Transaction queryset by a stored criteria dict.
 

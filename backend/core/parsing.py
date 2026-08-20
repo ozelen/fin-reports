@@ -188,7 +188,8 @@ def parse_decimal(value) -> Decimal | None:
         return None
     if isinstance(value, (int, float)):
         return Decimal(str(value))
-    s = re.sub(r"[^\d,.\-]", "", str(value).strip())
+    # Santander's English xlsx uses U+2212 MINUS SIGN, which is not ASCII '-'.
+    s = re.sub(r"[^\d,.\-]", "", str(value).strip().replace("\u2212", "-"))
     if not s or s in ("-", ".", ","):
         return None
     if "," in s and "." in s:
@@ -342,6 +343,21 @@ def _detect_currency(matrix: list[list], header: list[str]) -> str:
     return "EUR"
 
 
+def _card_last4(text: str) -> str:
+    """Last 4 of a PAN sitting in its own cell. Never keep the full number."""
+    compact = text.replace(" ", "")
+    if compact.isdigit() and 13 <= len(compact) <= 19:
+        return compact[-4:]
+    return ""
+
+
+def _append_meta_name(meta: dict, piece: str) -> None:
+    piece = (piece or "").strip()
+    if not piece or piece.lower() in meta["account_name"].lower():
+        return
+    meta["account_name"] = (meta["account_name"] + " " + piece).strip()
+
+
 def _extract_meta(matrix: list[list], header_row: int, header: list[str]) -> dict:
     meta = {"account_name": "", "account_iban": "", "account_holder": "",
             "currency": _detect_currency(matrix, header)}
@@ -351,21 +367,27 @@ def _extract_meta(matrix: list[list], header_row: int, header: list[str]) -> dic
             text = _cell_str(cell)
             if not text:
                 continue
+            last4 = _card_last4(text)
+            if last4:
+                _append_meta_name(meta, f"****{last4}")
+                continue
             m = IBAN_RE.search(text.replace(" ", ""))
             if m and not meta["account_iban"]:
                 meta["account_iban"] = m.group(1)
             low = text.lower()
-            if not meta["account_name"] and (
+            if (
                 "cuenta" in low
+                or "credito" in low
+                or "crédito" in low
+                or "credit" in low
+                or "tarjeta" in low
                 or low.startswith("card number")
                 or low.startswith("номер карт")
                 or low.startswith("card:")
             ):
-                # "Card number: 5358 **** **** 1026, ..." -> keep a short label.
-                if ":" in text:
-                    meta["account_name"] = text.split(":", 1)[1].strip()
-                else:
-                    meta["account_name"] = text
+                # "Card number: 5358 **** **** 1026, ..." / "CREDITO SANTANDER"
+                label = text.split(":", 1)[1].strip() if ":" in text else text
+                _append_meta_name(meta, label)
             # Monobank/other inline "Label: value" holder lines.
             if not meta["account_holder"] and (
                 low.startswith("client:")
@@ -385,6 +407,110 @@ def _extract_meta(matrix: list[list], header_row: int, header: list[str]) -> dic
 def dedupe_hash(operation_date, amount, concept, balance) -> str:
     key = f"{operation_date}|{amount}|{concept}|{balance}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+STATEMENT_EXTS = {"xls", "xlsx", "csv"}
+STATEMENT_MIMES = {
+    "text/csv",
+    "application/csv",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def is_statement_file(filename: str, mime: str = "", data: bytes = b"") -> bool:
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in (filename or "") else ""
+    if ext in STATEMENT_EXTS:
+        return True
+    mime = (mime or "").split(";")[0].strip().lower()
+    if mime in STATEMENT_MIMES:
+        return True
+    return bool(data) and data[:8] == _OLE_SIG
+
+
+def _norm_iban(value: str) -> str:
+    return re.sub(r"\s+", "", value or "").upper()
+
+
+def match_accounts(accounts, meta: dict, filename: str = "") -> list:
+    """Narrow accounts using IBAN, card digits, bank name, currency.
+
+    Returns one account when unique, otherwise the remaining candidates to ask.
+    """
+    accounts = list(accounts)
+    if not accounts:
+        return []
+    meta = meta or {}
+    iban = _norm_iban(meta.get("account_iban") or "")
+    currency = (meta.get("currency") or "").upper()
+    blob = f"{filename or ''} {meta.get('account_name') or ''} {meta.get('account_holder') or ''}".lower()
+    last4s = re.findall(r"\d{4}", meta.get("account_name") or "")
+
+    pool = accounts
+    by_iban = [a for a in pool if iban and _norm_iban(a.iban) == iban]
+    if len(by_iban) == 1:
+        return by_iban
+    if by_iban:
+        pool = by_iban
+
+    unmatched_card = False
+    if last4s:
+        by_card = [
+            a for a in pool if any(d in f"{a.name} {a.bank} {a.iban}" for d in last4s)
+        ]
+        if len(by_card) == 1:
+            return by_card
+        if by_card:
+            pool = by_card
+        else:
+            unmatched_card = True
+
+    # Card / Revolut exports have no IBAN. Drop checking accounts before a
+    # bank-name hit can unique-match e.g. "Santander" current account.
+    if not iban:
+        no_iban = [a for a in pool if not _norm_iban(a.iban)]
+        if no_iban:
+            pool = no_iban
+
+    named = []
+    for a in pool:
+        for label in (a.name, a.bank):
+            if label and len(label) >= 3 and label.lower() in blob:
+                named.append(a)
+                break
+    if len(named) == 1:
+        return named
+    if named:
+        pool = named
+
+    if currency:
+        by_cur = [a for a in pool if (a.currency or "").upper() == currency]
+        if by_cur:
+            pool = by_cur
+
+    # Card last4 present but on no account: ask instead of dumping onto Revolut.
+    if unmatched_card and len(pool) == 1:
+        return list(accounts)
+    return pool
+
+
+def pick_account(accounts, text: str):
+    """Map a user reply ('2', 'white', 'Monobank white') to one account."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    accounts = list(accounts)
+    if t.isdigit():
+        idx = int(t) - 1
+        if 0 <= idx < len(accounts):
+            return accounts[idx]
+    exact = [a for a in accounts if a.name.lower() == t]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [a for a in accounts if t in a.name.lower()]
+    if len(partial) == 1:
+        return partial[0]
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -421,7 +547,14 @@ def parse(path: str, filename: str) -> dict:
         if op_date is None or amount is None:
             continue
         state = _cell_str(col("state")).upper()
-        if state and state not in ("COMPLETED", "COMPLETE", "BOOKED", "POSTED"):
+        if state in {
+            "DECLINED",
+            "FAILED",
+            "REVERTED",
+            "REVERSED",
+            "CANCELLED",
+            "CANCELED",
+        }:
             continue
         balance = parse_decimal(col("balance"))
         value_date = parse_date(col("value_date"))
@@ -445,6 +578,15 @@ def parse(path: str, filename: str) -> dict:
         commission = parse_decimal(col("commission"))
         if commission:
             extras["commission"] = str(commission)
+            # Revolut Fee is extra to Amount and hits the balance. Monobank
+            # "commission" sits beside an already-net card-currency amount.
+            fee_header = ""
+            idx = cols.get("commission")
+            if idx is not None and idx < len(header):
+                fee_header = header[idx].lower()
+            if fee_header == "fee":
+                amount = amount - commission
+                extras["fee_in_amount"] = True
         cashback = parse_decimal(col("cashback"))
         if cashback:
             extras["cashback"] = str(cashback)
@@ -466,3 +608,68 @@ def parse(path: str, filename: str) -> dict:
     if not rows:
         raise ParseError("No transaction rows were found below the header.")
     return {"meta": meta, "rows": rows}
+
+
+def _self_check():
+    from types import SimpleNamespace as N
+
+    accs = [
+        N(name="Revolut", bank="Revolut", iban="", currency="EUR"),
+        N(name="Santander", bank="Santander", iban="ES8700493328862814076200", currency="EUR"),
+        N(name="Santander credit", bank="Santander", iban="", currency="EUR"),
+        N(name="Monobank white", bank="Monobank", iban="UA493220010000026202305133293", currency="UAH"),
+        N(name="Monobank black", bank="Monobank", iban="UA493220010000026202305133293", currency="UAH"),
+    ]
+    assert [a.name for a in match_accounts(accs, {"account_iban": "ES8700493328862814076200", "currency": "EUR"})] == ["Santander"]
+    assert {a.name for a in match_accounts(accs, {"account_iban": "UA493220010000026202305133293", "account_name": "5358 **** **** 1026", "currency": "UAH"})} == {
+        "Monobank white",
+        "Monobank black",
+    }
+    named = list(accs)
+    named[3] = N(name="Monobank white 1026", bank="Monobank", iban="UA493220010000026202305133293", currency="UAH")
+    assert [a.name for a in match_accounts(named, {"account_iban": "UA493220010000026202305133293", "account_name": "5358 **** **** 1026", "currency": "UAH"})] == ["Monobank white 1026"]
+    assert {a.name for a in match_accounts(accs, {"account_iban": "", "currency": "EUR"})} == {
+        "Revolut",
+        "Santander credit",
+    }
+    credit_meta = {
+        "account_iban": "",
+        "account_name": "CREDITO SANTANDER ****4883",
+        "currency": "EUR",
+    }
+    assert [a.name for a in match_accounts(accs, credit_meta)] == ["Santander credit"]
+    with_last4 = list(accs)
+    with_last4[2] = N(name="Santander credit 4883", bank="Santander", iban="", currency="EUR")
+    assert [a.name for a in match_accounts(with_last4, credit_meta)] == ["Santander credit 4883"]
+    no_credit = [a for a in accs if a.name != "Santander credit"]
+    assert {a.name for a in match_accounts(no_credit, credit_meta)} == {a.name for a in no_credit}
+    assert pick_account(accs, "white").name == "Monobank white"
+    assert pick_account(accs, "2").name == "Santander"
+    matrix = [
+        ["", "", "CREDITO SANTANDER", "Date"],
+        ["", "", "4000000000004883", "20/08/2026 | 12:32:15"],
+        ["", "", "Holder"],
+        ["", "", "ZELENYUK OLEKSIY"],
+        [],
+        ["Transactions"],
+        ["Transaction date", "Description", "Amount", "Currency"],
+        ["18/08/2026", "SHOP", "\u22124,05", "EUR"],
+    ]
+    header_row = _find_header_row(matrix)
+    header = [_cell_str(c) for c in matrix[header_row]]
+    meta = _extract_meta(matrix, header_row, header)
+    assert "4883" in meta["account_name"]
+    assert "santander" in meta["account_name"].lower()
+    assert "4000000000004883" not in meta["account_name"]
+    assert "ZELENYUK" in meta["account_holder"].upper()
+    assert not meta["account_iban"]
+    assert parse_decimal(matrix[7][2]) == Decimal("-4.05")
+    assert is_statement_file("report.xls")
+    assert not is_statement_file("photo.jpg", "image/jpeg")
+    assert parse_decimal("\u2212146,99") == Decimal("-146.99")
+    assert parse_decimal("-146,99") == Decimal("-146.99")
+    print("ok")
+
+
+if __name__ == "__main__":
+    _self_check()

@@ -47,11 +47,14 @@ def get_updates(offset: int, timeout: int = 50):
     )
 
 
-def send_message(chat_id: int, text: str):
+def send_message(chat_id: int, text: str, reply_markup: dict | None = None):
     # Telegram hard-caps a message at 4096 chars.
     text = text or ""
     for i in range(0, max(len(text), 1), 4000):
-        call("sendMessage", {"chat_id": chat_id, "text": text[i : i + 4000]})
+        payload = {"chat_id": chat_id, "text": text[i : i + 4000]}
+        if reply_markup is not None and i == 0:
+            payload["reply_markup"] = reply_markup
+        call("sendMessage", payload)
 
 
 def send_chat_action(chat_id: int, action: str = "typing"):
@@ -73,6 +76,13 @@ def download_file(file_id: str) -> tuple[bytes, str, str]:
     except urllib.error.URLError as exc:
         raise TelegramError(f"file download failed: {exc}") from exc
     filename = path.rsplit("/", 1)[-1] or "file"
+    if mime not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+        if data[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif filename.lower().endswith(".jpg") or filename.lower().endswith(".jpeg"):
+            mime = "image/jpeg"
     return data, filename, mime
 
 

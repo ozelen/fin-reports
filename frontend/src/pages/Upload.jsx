@@ -26,7 +26,7 @@ export default function UploadPage() {
   const [accountId, setAccountId] = useState("");
 
   useEffect(() => {
-    api.get("/accounts/", { params: { page_size: 200 } }).then(({ data }) => {
+    api.get("/accounts/", { params: { page_size: 200, kind: "bank" } }).then(({ data }) => {
       setAccounts(data.results);
       const def = data.results.find((a) => a.is_default) || data.results[0];
       if (def) setAccountId(def.id);
@@ -137,6 +137,10 @@ export default function UploadPage() {
               Imported <strong>{result.imported_count}</strong> transactions
               {result.skipped_duplicates > 0 &&
                 ` (${result.skipped_duplicates} duplicates skipped)`}
+              {result.receipts_enriched > 0 &&
+                ` · ${result.receipts_enriched} receipt${result.receipts_enriched === 1 ? "" : "s"} filled in from this statement`}
+              {result.receipts_attached > 0 &&
+                ` · ${result.receipts_attached} receipt${result.receipts_attached === 1 ? "" : "s"} newly attached`}
               .
             </Typography>
             <Typography variant="body2" color="text.secondary">

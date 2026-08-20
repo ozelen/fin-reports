@@ -20,25 +20,23 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import DescriptionIcon from "@mui/icons-material/Description";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
+import { useParams } from "react-router-dom";
 import api from "../api";
 
-const KINDS = [
-  { value: "agreement", label: "Agreement" },
-  { value: "order", label: "Order" },
-  { value: "offer", label: "Offer" },
+const PERSONAL_KINDS = [
   { value: "tax_declaration", label: "Tax declaration" },
   { value: "tax_certificate", label: "Tax certificate" },
   { value: "other", label: "Other" },
 ];
 
-const SCOPES = [
-  { value: "", label: "All" },
-  { value: "personal", label: "Personal" },
-  { value: "client", label: "Per client" },
+const CLIENT_KINDS = [
+  { value: "agreement", label: "Agreement" },
+  { value: "order", label: "Order" },
+  { value: "offer", label: "Offer" },
+  { value: "other", label: "Other" },
 ];
 
 const BLANK = {
-  client: "",
   kind: "other",
   title: "",
   document_date: "",
@@ -46,11 +44,12 @@ const BLANK = {
 };
 
 export default function Documents() {
+  const { clientId } = useParams();
+  const personal = !clientId;
+  const kinds = personal ? PERSONAL_KINDS : CLIENT_KINDS;
+
   const [docs, setDocs] = useState([]);
-  const [clients, setClients] = useState([]);
-  const [scope, setScope] = useState("");
   const [kindFilter, setKindFilter] = useState("");
-  const [clientFilter, setClientFilter] = useState("");
   const [error, setError] = useState("");
 
   const [open, setOpen] = useState(false);
@@ -60,27 +59,22 @@ export default function Documents() {
 
   const load = async () => {
     const params = { page_size: 200 };
-    if (scope) params.scope = scope;
+    if (personal) params.scope = "personal";
+    else params.client = clientId;
     if (kindFilter) params.kind = kindFilter;
-    if (clientFilter) params.client = clientFilter;
-    const [d, c] = await Promise.all([
-      api.get("/documents/", { params }),
-      api.get("/clients/", { params: { page_size: 200 } }),
-    ]);
-    setDocs(d.data.results);
-    setClients(c.data.results);
+    const { data } = await api.get("/documents/", { params });
+    setDocs(data.results);
   };
 
   useEffect(() => {
     load().catch((e) => setError(e.response?.data?.detail || e.message));
-  }, [scope, kindFilter, clientFilter]);
+  }, [clientId, kindFilter, personal]);
 
   const openNew = () => {
     setEditing(null);
     setForm({
       ...BLANK,
-      kind: scope === "personal" ? "tax_declaration" : "agreement",
-      client: clientFilter || "",
+      kind: personal ? "tax_declaration" : "agreement",
     });
     setFile(null);
     setOpen(true);
@@ -89,7 +83,6 @@ export default function Documents() {
   const openEdit = (doc) => {
     setEditing(doc);
     setForm({
-      client: doc.client || "",
       kind: doc.kind,
       title: doc.title,
       document_date: doc.document_date || "",
@@ -106,8 +99,8 @@ export default function Documents() {
     body.append("title", form.title.trim());
     body.append("notes", form.notes || "");
     if (form.document_date) body.append("document_date", form.document_date);
-    if (form.client) body.append("client", form.client);
-    else body.append("client", "");
+    if (personal) body.append("client", "");
+    else body.append("client", clientId);
     if (file) body.append("file", file);
 
     try {
@@ -145,36 +138,13 @@ export default function Documents() {
   };
 
   const kindLabel = useMemo(
-    () => Object.fromEntries(KINDS.map((k) => [k.value, k.label])),
+    () => Object.fromEntries([...PERSONAL_KINDS, ...CLIENT_KINDS].map((k) => [k.value, k.label])),
     []
   );
 
   return (
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
-          Documents
-        </Typography>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={openNew}>
-          Upload
-        </Button>
-      </Stack>
-
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ mb: 2 }}>
-        <TextField
-          select
-          label="Scope"
-          value={scope}
-          onChange={(e) => setScope(e.target.value)}
-          size="small"
-          sx={{ minWidth: 160 }}
-        >
-          {SCOPES.map((s) => (
-            <MenuItem key={s.value || "all"} value={s.value}>
-              {s.label}
-            </MenuItem>
-          ))}
-        </TextField>
         <TextField
           select
           label="Kind"
@@ -184,28 +154,15 @@ export default function Documents() {
           sx={{ minWidth: 180 }}
         >
           <MenuItem value="">All kinds</MenuItem>
-          {KINDS.map((k) => (
+          {kinds.map((k) => (
             <MenuItem key={k.value} value={k.value}>
               {k.label}
             </MenuItem>
           ))}
         </TextField>
-        <TextField
-          select
-          label="Client"
-          value={clientFilter}
-          onChange={(e) => setClientFilter(e.target.value)}
-          size="small"
-          sx={{ minWidth: 220 }}
-          disabled={scope === "personal"}
-        >
-          <MenuItem value="">All clients</MenuItem>
-          {clients.map((c) => (
-            <MenuItem key={c.id} value={c.id}>
-              {c.name}
-            </MenuItem>
-          ))}
-        </TextField>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={openNew}>
+          Upload
+        </Button>
       </Stack>
 
       {error && (
@@ -226,12 +183,6 @@ export default function Documents() {
               <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                 <Typography sx={{ fontWeight: 600 }}>{doc.title}</Typography>
                 <Chip size="small" label={kindLabel[doc.kind] || doc.kind} />
-                <Chip
-                  size="small"
-                  variant="outlined"
-                  label={doc.client_label || "Personal"}
-                  color={doc.client ? "primary" : "default"}
-                />
               </Stack>
               <Typography variant="body2" color="text.secondary">
                 {[doc.document_date, doc.original_filename].filter(Boolean).join(" · ")}
@@ -264,27 +215,12 @@ export default function Documents() {
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField
               select
-              label="Client"
-              value={form.client}
-              onChange={(e) => setForm({ ...form, client: e.target.value })}
-              fullWidth
-              helperText="Leave empty for personal documents (tax, certificates…)"
-            >
-              <MenuItem value="">Personal (no client)</MenuItem>
-              {clients.map((c) => (
-                <MenuItem key={c.id} value={c.id}>
-                  {c.name}
-                </MenuItem>
-              ))}
-            </TextField>
-            <TextField
-              select
               label="Kind"
               value={form.kind}
               onChange={(e) => setForm({ ...form, kind: e.target.value })}
               fullWidth
             >
-              {KINDS.map((k) => (
+              {kinds.map((k) => (
                 <MenuItem key={k.value} value={k.value}>
                   {k.label}
                 </MenuItem>

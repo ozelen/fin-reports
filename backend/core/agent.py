@@ -8,19 +8,43 @@ from django.conf import settings
 from django.db.models import Count, Q, Sum
 
 from .criteria import apply_criteria
-from .models import Account, Invoice, PurchaseItem, Receipt, Transaction
-from .receipts import candidate_transactions
+from .fx import summarize_eur
+from .models import Account, Invoice, PurchaseItem, Receipt, Tag, Transaction, TransactionTag
+from .receipts import (
+    candidate_transactions,
+    filter_by_name_tokens,
+    link_receipt,
+    lookup_similar_items,
+    name_tokens,
+    parse_amount,
+    reparse_receipt,
+    set_item_tags,
+)
 
 SYSTEM_PROMPT = """You are a personal finance assistant for Income Share, a bookkeeping app.
 You help the owner understand bank transactions, income vs expenses, issued invoices,
 incoming receipts, and purchase line-items parsed from those receipts.
 
 Rules:
-- Be concise. Use the owner's currencies as stored; never sum mixed currencies.
+- Be concise. Totals in EUR use NBU daily rates when the owner has mixed or non-EUR currencies; always also report the native per-currency breakdown.
 - Never invent transaction, receipt, or invoice ids. Only use ids returned by tools.
-- Receipts may arrive before the bank transaction. If there is exactly one good match,
-  attach it. If several, list them and ask. If none, say it will wait for a later import.
-- When a receipt is saved, confirm the parsed items and spend category.
+- Receipts often arrive before the bank statement. If there is no bank match,
+  a pending transaction is created automatically and shows up in the ledger.
+  Do not tell the user it is missing. When a statement is imported later, that
+  pending row is enriched (same id, tags and items kept).
+- After saving a receipt, always try suggest_matches / attach_receipt.
+- If a receipt was parsed before titles/barcodes existed, call reparse_receipt.
+- Line items have `name` (printed OCR — never change it; it is how products are
+  found and classified) and `title` (custom human label, e.g. 'beef mince 1kg'
+  for BURGER M VACUN 1000G). Set title with update_item.
+- Before guessing a title or tags for an item or transaction, call
+  lookup_similar_items (and search_transactions for the merchant). If a past
+  line matches (BURGER * VACUN *G), reuse its title and tags. Only guess when
+  lookup returns nothing, and then ask before creating a new tag.
+- Tag each item (food vs household chemicals on the same check). Prefer existing
+  tags from list_tags; create a tag only when none fit. Then tag the parent
+  transaction with the union of item tags (tag_transaction).
+- To attach a product photo to an item, call await_item_photo then tell the user to send it.
 - Today is {today}.
 """
 
@@ -98,7 +122,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "attach_receipt",
-            "description": "Link a receipt to a bank transaction.",
+            "description": "Link a receipt and its line items to a bank transaction.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -106,6 +130,18 @@ TOOLS = [
                     "transaction_id": {"type": "integer"},
                 },
                 "required": ["receipt_id", "transaction_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reparse_receipt",
+            "description": "Re-read a Telegram receipt image for titles, barcodes, and items.",
+            "parameters": {
+                "type": "object",
+                "properties": {"receipt_id": {"type": "integer"}},
+                "required": ["receipt_id"],
             },
         },
     },
@@ -128,7 +164,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_purchases",
-            "description": "Search parsed purchase line-items (what was bought).",
+            "description": "Search purchase lines. Keyword is fuzzy (BURGER VACUN matches BURGER M VACUN 1000G).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -139,6 +175,21 @@ TOOLS = [
                     "date_to": {"type": "string"},
                     "limit": {"type": "integer"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_similar_items",
+            "description": "Fuzzy-search past purchase lines by printed name. Call before guessing title or tags.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Printed OCR name, e.g. BURGER M VACUN 1000G"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["name"],
             },
         },
     },
@@ -160,8 +211,83 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "update_item",
+            "description": "Set custom title, barcode, tags. Never changes the printed name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "title": {"type": "string", "description": "Custom label. Does not replace printed name."},
+                    "barcode": {"type": "string"},
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tag names for this line (food, household, ...).",
+                    },
+                    "category": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "unit_price": {"type": "number"},
+                    "amount": {"type": "number"},
+                },
+                "required": ["item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "await_item_photo",
+            "description": "Next photo the user sends is stored as this item's product picture.",
+            "parameters": {
+                "type": "object",
+                "properties": {"item_id": {"type": "integer"}},
+                "required": ["item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tags",
+            "description": "List the owner's tags (use these names before creating new ones).",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tag_item",
+            "description": "Set tags on a purchase line. Does not change the printed name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["item_id", "tags"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tag_transaction",
+            "description": "Add tags to a bank/pending transaction (does not remove existing).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": {"type": "integer"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["transaction_id", "tags"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_accounts",
-            "description": "List bank accounts.",
+            "description": "List accounts (bank, cash wallets, debts) with balances.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -175,22 +301,40 @@ def _tx_row(tx: Transaction) -> dict:
         "amount": str(tx.amount),
         "currency": tx.currency,
         "kind": tx.kind,
+        "pending": tx.pending,
         "counterparty": tx.counterparty,
         "concept": (tx.concept or "")[:180],
         "account": tx.account.name if tx.account_id else None,
+        "tags": [t.name for t in tx.tags.all()],
+    }
+
+
+def _item_row(it: PurchaseItem) -> dict:
+    return {
+        "id": it.id,
+        "name": it.name,
+        "title": it.title,
+        "label": it.label,
+        "barcode": it.barcode,
+        "qty": str(it.quantity),
+        "amount": str(it.amount) if it.amount is not None else None,
+        "category": it.category,
+        "tags": [t.name for t in it.tags.all()],
+        "receipt_id": it.receipt_id,
+        "transaction_id": it.transaction_id,
+        "has_photo": bool(it.telegram_photo_file_id),
+        "merchant": it.receipt.merchant if it.receipt_id else None,
+        "currency": it.receipt.currency if it.receipt_id else None,
+        "date": (
+            it.receipt.document_date.isoformat()
+            if it.receipt_id and it.receipt.document_date
+            else None
+        ),
     }
 
 
 def _receipt_row(r: Receipt) -> dict:
-    items = [
-        {
-            "name": it.name,
-            "qty": str(it.quantity),
-            "amount": str(it.amount) if it.amount is not None else None,
-            "category": it.category,
-        }
-        for it in r.items.all()[:40]
-    ]
+    items = [_item_row(it) for it in r.items.all()[:40]]
     return {
         "id": r.id,
         "kind": r.kind,
@@ -199,6 +343,7 @@ def _receipt_row(r: Receipt) -> dict:
         "currency": r.currency,
         "date": r.document_date.isoformat() if r.document_date else None,
         "transaction_id": r.transaction_id,
+        "telegram_file_id": r.telegram_file_id,
         "filename": r.original_filename,
         "notes": (r.notes or "")[:200],
         "items": items,
@@ -218,12 +363,14 @@ def _run_tool(user, name: str, args: dict) -> dict:
             "account": args.get("account_id"),
         }
         qs = apply_criteria(
-            Transaction.objects.filter(owner=user).select_related("account"),
+            Transaction.objects.filter(owner=user).select_related("account").prefetch_related("tags"),
             criteria,
         )
         kw = (args.get("keyword") or "").strip()
         if kw:
-            qs = qs.filter(Q(concept__icontains=kw) | Q(counterparty__icontains=kw))
+            tokens = name_tokens(kw) or [kw]
+            for token in tokens[:4]:
+                qs = qs.filter(Q(concept__icontains=token) | Q(counterparty__icontains=token))
         rows = [_tx_row(tx) for tx in qs.order_by("-operation_date", "-id")[:limit]]
         return {"count": qs.count(), "transactions": rows}
 
@@ -237,40 +384,45 @@ def _run_tool(user, name: str, args: dict) -> dict:
             "account": args.get("account_id"),
         }
         qs = apply_criteria(Transaction.objects.filter(owner=user), criteria)
-        by_currency = list(
-            qs.values("currency")
-            .annotate(
-                count=Count("id"),
-                income=Sum("amount", filter=Q(amount__gte=0)),
-                expense=Sum("amount", filter=Q(amount__lt=0)),
-            )
-            .order_by("currency")
-        )
+        summary = summarize_eur(qs)
+        native = [
+            {
+                "currency": row["currency"] or "EUR",
+                "count": row["count"] or 0,
+                "income": str(row["income"] or 0),
+                "expense": str(row["expense"] or 0),
+                "net": str(row["net"] or 0),
+            }
+            for row in summary["currencies"]
+        ]
         return {
-            "currencies": [
-                {
-                    "currency": row["currency"] or "EUR",
-                    "count": row["count"] or 0,
-                    "income": str(row["income"] or 0),
-                    "expense": str(row["expense"] or 0),
-                    "net": str((row["income"] or 0) + (row["expense"] or 0)),
-                }
-                for row in by_currency
-            ]
+            "currency": summary["currency"],
+            "converted": summary["converted"],
+            "count": summary["count"],
+            "income": None if summary["income"] is None else str(summary["income"]),
+            "expense": None if summary["expense"] is None else str(summary["expense"]),
+            "net": None if summary["net"] is None else str(summary["net"]),
+            "currencies": native,
         }
 
     if name == "list_receipts":
-        qs = Receipt.objects.filter(owner=user).prefetch_related("items")
+        qs = Receipt.objects.filter(owner=user).prefetch_related("items__tags")
         if args.get("unattached_only"):
             qs = qs.filter(transaction__isnull=True)
         rows = [_receipt_row(r) for r in qs.order_by("-created_at")[:limit]]
         return {"receipts": rows}
 
     if name == "search_purchases":
-        qs = PurchaseItem.objects.filter(receipt__owner=user).select_related("receipt")
+        qs = PurchaseItem.objects.filter(receipt__owner=user).select_related("receipt").prefetch_related("tags")
         kw = (args.get("keyword") or "").strip()
         if kw:
-            qs = qs.filter(Q(name__icontains=kw) | Q(category__icontains=kw))
+            named = filter_by_name_tokens(qs, kw)
+            tagged = qs.filter(
+                Q(tags__name__icontains=kw)
+                | Q(category__icontains=kw)
+                | Q(barcode__icontains=kw)
+            )
+            qs = (named | tagged).distinct()
         if args.get("category"):
             qs = qs.filter(category__iexact=args["category"])
         if args.get("merchant"):
@@ -279,25 +431,75 @@ def _run_tool(user, name: str, args: dict) -> dict:
             qs = qs.filter(receipt__document_date__gte=args["date_from"])
         if args.get("date_to"):
             qs = qs.filter(receipt__document_date__lte=args["date_to"])
-        rows = [
-            {
-                "id": it.id,
-                "name": it.name,
-                "qty": str(it.quantity),
-                "amount": str(it.amount) if it.amount is not None else None,
-                "category": it.category,
-                "merchant": it.receipt.merchant,
-                "date": (
-                    it.receipt.document_date.isoformat()
-                    if it.receipt.document_date
-                    else None
-                ),
-                "receipt_id": it.receipt_id,
-                "currency": it.receipt.currency,
-            }
-            for it in qs.order_by("-receipt__document_date", "-id")[:limit]
-        ]
+        rows = [_item_row(it) for it in qs.select_related("receipt").order_by("-receipt__document_date", "-id")[:limit]]
         return {"items": rows}
+
+    if name == "lookup_similar_items":
+        printed = (args.get("name") or "").strip()
+        if not printed:
+            return {"error": "name required"}
+        hits = lookup_similar_items(
+            user, printed, limit=min(int(args.get("limit") or 8), 20)
+        )
+        suggested_title = next((h.title for h in hits if h.title), None)
+        suggested_tags = []
+        seen = set()
+        for h in hits:
+            for tag in h.tags.all():
+                key = tag.name.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    suggested_tags.append(tag.name)
+        return {
+            "query": printed,
+            "tokens": name_tokens(printed),
+            "matches": [_item_row(h) for h in hits],
+            "suggested_title": suggested_title,
+            "suggested_tags": suggested_tags,
+        }
+
+    if name == "update_item":
+        item = (
+            PurchaseItem.objects.filter(id=args["item_id"], receipt__owner=user)
+            .select_related("receipt")
+            .first()
+        )
+        if item is None:
+            return {"error": "item not found"}
+        if "title" in args and args["title"] is not None:
+            item.title = str(args["title"]).strip()[:255]
+        if "barcode" in args and args["barcode"] is not None:
+            item.barcode = "".join(ch for ch in str(args["barcode"]) if ch.isalnum())[:64]
+        if "category" in args and args["category"] is not None:
+            item.category = str(args["category"]).strip().lower()[:80]
+        if "quantity" in args and args["quantity"] is not None:
+            item.quantity = parse_amount(args["quantity"]) or item.quantity
+        if "unit_price" in args and args["unit_price"] is not None:
+            item.unit_price = parse_amount(args["unit_price"])
+        if "amount" in args and args["amount"] is not None:
+            item.amount = parse_amount(args["amount"])
+        item.save()
+        if "tags" in args and args["tags"] is not None:
+            set_item_tags(item, Tag.resolve(user, args["tags"]))
+        elif "category" in args and item.category:
+            set_item_tags(item, Tag.resolve(user, [item.category]))
+        item = PurchaseItem.objects.prefetch_related("tags").get(pk=item.pk)
+        return {"ok": True, "item": _item_row(item)}
+
+    if name == "await_item_photo":
+        item = PurchaseItem.objects.filter(
+            id=args["item_id"], receipt__owner=user
+        ).first()
+        if item is None:
+            return {"error": "item not found"}
+        from .models import TelegramLink
+
+        TelegramLink.objects.filter(owner=user).update(pending_item_id=item.id)
+        return {
+            "ok": True,
+            "item": _item_row(item),
+            "hint": "Send a photo next; it will be stored as this item's picture (Telegram file_id only).",
+        }
 
     if name == "summarize_purchases":
         qs = PurchaseItem.objects.filter(receipt__owner=user)
@@ -348,9 +550,23 @@ def _run_tool(user, name: str, args: dict) -> dict:
             return {"error": "receipt not found"}
         if tx is None:
             return {"error": "transaction not found"}
-        receipt.transaction = tx
-        receipt.save(update_fields=["transaction"])
+        link_receipt(receipt, tx)
+        receipt.refresh_from_db()
         return {"ok": True, "receipt": _receipt_row(receipt), "transaction": _tx_row(tx)}
+
+    if name == "reparse_receipt":
+        receipt = (
+            Receipt.objects.filter(owner=user, id=args["receipt_id"])
+            .prefetch_related("items")
+            .first()
+        )
+        if receipt is None:
+            return {"error": "receipt not found"}
+        try:
+            receipt = reparse_receipt(receipt)
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+        return {"ok": True, "receipt": _receipt_row(receipt)}
 
     if name == "list_invoices":
         qs = Invoice.objects.filter(owner=user)
@@ -373,15 +589,80 @@ def _run_tool(user, name: str, args: dict) -> dict:
         ]
         return {"invoices": rows}
 
+    if name == "list_tags":
+        rows = list(
+            Tag.objects.filter(owner=user).values("id", "name", "description", "color")
+        )
+        return {"tags": rows}
+
+    if name == "tag_item":
+        item = PurchaseItem.objects.filter(
+            id=args["item_id"], receipt__owner=user
+        ).first()
+        if item is None:
+            return {"error": "item not found"}
+        set_item_tags(item, Tag.resolve(user, args.get("tags") or []))
+        item = PurchaseItem.objects.prefetch_related("tags").get(pk=item.pk)
+        return {"ok": True, "item": _item_row(item)}
+
+    if name == "tag_transaction":
+        tx = Transaction.objects.filter(owner=user, id=args["transaction_id"]).first()
+        if tx is None:
+            return {"error": "transaction not found"}
+        for tag in Tag.resolve(user, args.get("tags") or []):
+            TransactionTag.objects.get_or_create(
+                transaction=tx,
+                tag=tag,
+                defaults={"source": TransactionTag.SOURCE_AI},
+            )
+        tx = Transaction.objects.prefetch_related("tags").get(pk=tx.pk)
+        return {"ok": True, "transaction": _tx_row(tx)}
+
     if name == "list_accounts":
         rows = list(
             Account.objects.filter(owner=user).values(
-                "id", "name", "bank", "currency", "group", "iban"
+                "id", "name", "kind", "bank", "currency", "group", "iban", "balance"
             )
         )
         return {"accounts": rows}
 
     return {"error": f"unknown tool {name}"}
+
+
+def _thought_extra(tc) -> dict | None:
+    extra = getattr(tc, "extra_content", None)
+    if isinstance(extra, dict) and extra:
+        return extra
+    dumped = tc.model_dump(exclude_none=True) if hasattr(tc, "model_dump") else {}
+    if dumped.get("extra_content"):
+        return dumped["extra_content"]
+    more = getattr(tc, "model_extra", None) or {}
+    if more.get("extra_content"):
+        return more["extra_content"]
+    sig = dumped.get("thought_signature") or more.get("thought_signature")
+    if sig:
+        return {"google": {"thought_signature": sig}}
+    return None
+
+
+def _assistant_tool_message(msg) -> dict:
+    """Echo tool_calls including Gemini thought_signature, or skip-validator."""
+    tool_calls = []
+    for tc in msg.tool_calls:
+        entry = {
+            "id": tc.id,
+            "type": "function",
+            "function": {
+                "name": tc.function.name,
+                "arguments": tc.function.arguments,
+            },
+        }
+        extra = _thought_extra(tc)
+        entry["extra_content"] = extra or {
+            "google": {"thought_signature": "skip_thought_signature_validator"}
+        }
+        tool_calls.append(entry)
+    return {"role": "assistant", "content": msg.content, "tool_calls": tool_calls}
 
 
 def reply(user, history: list[dict], extra_user_text: str = "") -> str:
@@ -410,23 +691,7 @@ def reply(user, history: list[dict], extra_user_text: str = "") -> str:
         if not msg.tool_calls:
             return (msg.content or "").strip() or "Done."
 
-        messages.append(
-            {
-                "role": "assistant",
-                "content": msg.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ],
-            }
-        )
+        messages.append(_assistant_tool_message(msg))
         for tc in msg.tool_calls:
             try:
                 args = json.loads(tc.function.arguments or "{}")

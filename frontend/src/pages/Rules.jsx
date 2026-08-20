@@ -115,10 +115,7 @@ export default function Rules() {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
-          Rules
-        </Typography>
+      <Stack direction="row" justifyContent="flex-end" alignItems="center" sx={{ mb: 2 }}>
         <Stack direction="row" spacing={1}>
           <Button startIcon={<PlayArrowIcon />} onClick={applyAll}>
             Apply all now

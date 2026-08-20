@@ -1,12 +1,17 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import (
     Account,
+    Budget,
     Client,
     Document,
     Folder,
     Invoice,
     IssuerProfile,
+    PurchaseItem,
+    Receipt,
     Rule,
     Tag,
     Transaction,
@@ -40,12 +45,14 @@ class AccountSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "name",
+            "kind",
             "bank",
             "iban",
             "bic",
             "correspondent_bic",
             "bank_address",
             "currency",
+            "balance",
             "group",
             "is_default",
             "is_invoice_default",
@@ -53,6 +60,31 @@ class AccountSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "transaction_count", "created_at"]
+
+    def validate(self, attrs):
+        kind = attrs.get("kind") or getattr(self.instance, "kind", Account.KIND_BANK)
+        if kind != Account.KIND_BANK:
+            attrs["is_default"] = False
+            attrs["is_invoice_default"] = False
+        return attrs
+
+
+class TransferSerializer(serializers.Serializer):
+    from_account = OwnerScopedPKField(model=Account)
+    to_account = OwnerScopedPKField(model=Account)
+    amount = serializers.DecimalField(
+        max_digits=14, decimal_places=2, min_value=Decimal("0.01")
+    )
+    operation_date = serializers.DateField()
+    concept = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate(self, attrs):
+        src, dst = attrs["from_account"], attrs["to_account"]
+        if src.pk == dst.pk:
+            raise serializers.ValidationError("Pick two different accounts.")
+        if (src.currency or "").upper() != (dst.currency or "").upper():
+            raise serializers.ValidationError("Accounts must share a currency.")
+        return attrs
 
 
 class IssuerProfileSerializer(serializers.ModelSerializer):
@@ -271,6 +303,39 @@ class TagSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "transaction_count", "created_at"]
 
 
+class BudgetSerializer(serializers.ModelSerializer):
+    tag = OwnerScopedPKField(model=Tag)
+    account = OwnerScopedPKField(model=Account, required=False, allow_null=True)
+    tag_name = serializers.CharField(source="tag.name", read_only=True)
+    tag_color = serializers.CharField(source="tag.color", read_only=True)
+    account_label = serializers.CharField(
+        source="account.name", read_only=True, default=None
+    )
+
+    class Meta:
+        model = Budget
+        fields = [
+            "id",
+            "tag",
+            "tag_name",
+            "tag_color",
+            "account",
+            "account_label",
+            "period",
+            "kind",
+            "amount",
+            "is_active",
+            "created_at",
+        ]
+        read_only_fields = [
+            "id",
+            "tag_name",
+            "tag_color",
+            "account_label",
+            "created_at",
+        ]
+
+
 class TransactionTagSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(source="tag.id", read_only=True)
     name = serializers.CharField(source="tag.name", read_only=True)
@@ -283,8 +348,11 @@ class TransactionTagSerializer(serializers.ModelSerializer):
 
 class TransactionSerializer(serializers.ModelSerializer):
     kind = serializers.CharField(read_only=True)
+    pending = serializers.BooleanField(read_only=True)
     tags = TransactionTagSerializer(source="tag_links", many=True, read_only=True)
     account_label = serializers.CharField(source="account.name", read_only=True)
+    receipt_id = serializers.IntegerField(read_only=True, allow_null=True)
+    item_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Transaction
@@ -298,11 +366,14 @@ class TransactionSerializer(serializers.ModelSerializer):
             "balance",
             "currency",
             "kind",
+            "pending",
             "tags",
             "metadata",
             "upload",
             "account",
             "account_label",
+            "receipt_id",
+            "item_count",
             "created_at",
         ]
         read_only_fields = fields
@@ -385,3 +456,72 @@ class AiApplySerializer(serializers.Serializer):
         confidence = serializers.FloatField(required=False, allow_null=True, default=None)
 
     items = _Item(many=True)
+
+
+class ItemTagSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tag
+        fields = ["id", "name", "color"]
+
+
+class PurchaseItemSerializer(serializers.ModelSerializer):
+    tags = ItemTagSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PurchaseItem
+        fields = [
+            "id",
+            "name",
+            "title",
+            "barcode",
+            "quantity",
+            "unit_price",
+            "amount",
+            "category",
+            "tags",
+        ]
+
+
+class ReceiptSerializer(serializers.ModelSerializer):
+    items = PurchaseItemSerializer(many=True, read_only=True)
+    file_url = serializers.SerializerMethodField()
+    kind_label = serializers.CharField(source="get_kind_display", read_only=True)
+    details = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Receipt
+        fields = [
+            "id",
+            "kind",
+            "kind_label",
+            "merchant",
+            "amount",
+            "currency",
+            "document_date",
+            "notes",
+            "original_filename",
+            "file_url",
+            "details",
+            "transaction",
+            "items",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_file_url(self, obj):
+        if not obj.file:
+            return None
+        request = self.context.get("request")
+        path = f"/api/receipts/{obj.pk}/download/"
+        return request.build_absolute_uri(path) if request else path
+
+    def get_details(self, obj):
+        skip = {"items", "merchant", "date", "amount", "currency", "kind", "notes"}
+        out = {}
+        for key, value in (obj.extracted or {}).items():
+            if key in skip or value in (None, "", [], {}):
+                continue
+            if isinstance(value, (dict, list)):
+                continue
+            out[key] = value
+        return out

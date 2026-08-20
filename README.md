@@ -63,6 +63,29 @@ Receipt photos are sent to Gemini for extraction (merchant, totals, and line ite
 PDFs are stored as-is (no OCR). Unmatched receipts attach automatically when a later
 statement import has exactly one amount+date hit (merchant name breaks ties).
 
+## Database backups
+
+A `backup` service dumps Postgres into `./backups/` on a schedule (default: daily,
+keep 14 days). Dumps use `pg_dump -Fc` (compressed custom format).
+
+```bash
+# start / restart the job (picks up .env)
+docker compose up -d backup
+
+# one-shot dump now
+docker compose run --rm --entrypoint /bin/sh backup /backup.sh
+
+# restore (stops writers first; replaces the current database)
+docker compose stop api bot
+docker compose exec -T db pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  --clean --if-exists --no-owner < backups/income-share-YYYYMMDDThhmmssZ.dump
+docker compose start api bot
+```
+
+`BACKUP_INTERVAL_SECONDS` and `BACKUP_KEEP_DAYS` are in `.env`. The in-app Backup
+page is a JSON export of your data, not a full database dump. Media files
+(receipts, documents) live on the `media` volume and are not included.
+
 ## Architecture
 
 ```

@@ -7,11 +7,14 @@ from .views import (
     AiViewSet,
     BackupExportView,
     BackupImportView,
+    BudgetViewSet,
     ClientViewSet,
     DocumentViewSet,
     FolderViewSet,
     InvoiceViewSet,
     IssuerProfileView,
+    PurchaseItemViewSet,
+    ReceiptViewSet,
     RuleViewSet,
     TagViewSet,
     TransactionViewSet,
@@ -24,11 +27,14 @@ router.register("transactions", TransactionViewSet, basename="transaction")
 router.register("accounts", AccountViewSet, basename="account")
 router.register("folders", FolderViewSet, basename="folder")
 router.register("tags", TagViewSet, basename="tag")
+router.register("budgets", BudgetViewSet, basename="budget")
 router.register("rules", RuleViewSet, basename="rule")
 router.register("ai", AiViewSet, basename="ai")
 router.register("clients", ClientViewSet, basename="client")
 router.register("documents", DocumentViewSet, basename="document")
 router.register("invoices", InvoiceViewSet, basename="invoice")
+router.register("receipts", ReceiptViewSet, basename="receipt")
+router.register("purchase-items", PurchaseItemViewSet, basename="purchase-item")
 
 urlpatterns = [
     path("auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),

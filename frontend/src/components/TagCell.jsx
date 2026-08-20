@@ -54,7 +54,7 @@ export function TagCell({ row, onOpen, onRemove }) {
           key={t.id}
           size="small"
           label={t.name}
-          title={`source: ${t.source}`}
+          title={t.source ? `source: ${t.source}` : undefined}
           onDelete={(e) => {
             e.stopPropagation();
             onRemove(row, t.id);

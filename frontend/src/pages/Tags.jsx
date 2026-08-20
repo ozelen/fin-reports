@@ -61,10 +61,7 @@ export default function Tags() {
 
   return (
     <Box>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
-          Tags
-        </Typography>
+      <Stack direction="row" justifyContent="flex-end" alignItems="center" sx={{ mb: 2 }}>
         <Button variant="contained" startIcon={<AddIcon />} onClick={openNew}>
           New tag
         </Button>

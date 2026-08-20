@@ -18,6 +18,9 @@ frontend/dist/
 # Env / secrets
 .env
 
+# Postgres dumps from the backup job
+/backups/
+
 # OS / editor
 .DS_Store
 .idea/

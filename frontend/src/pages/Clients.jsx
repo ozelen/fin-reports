@@ -16,8 +16,9 @@ import {
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import BusinessIcon from "@mui/icons-material/Business";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import DeleteIcon from "@mui/icons-material/Delete";
-import EditIcon from "@mui/icons-material/Edit";
+import { useNavigate } from "react-router-dom";
 import api from "../api";
 
 const VAT_MODES = [
@@ -41,9 +42,9 @@ const BLANK = {
 };
 
 export default function Clients() {
+  const navigate = useNavigate();
   const [clients, setClients] = useState([]);
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(BLANK);
 
   const load = async () => {
@@ -56,24 +57,7 @@ export default function Clients() {
   }, []);
 
   const openNew = () => {
-    setEditing(null);
     setForm(BLANK);
-    setOpen(true);
-  };
-
-  const openEdit = (client) => {
-    setEditing(client);
-    setForm({
-      name: client.name,
-      tax_id: client.tax_id || "",
-      address: client.address || "",
-      vat_mode: client.vat_mode,
-      default_vat_rate: String(client.default_vat_rate ?? "0"),
-      default_description: client.default_description || "",
-      default_unit_price: String(client.default_unit_price ?? "0"),
-      currency: client.currency || "EUR",
-      notes: client.notes || "",
-    });
     setOpen(true);
   };
 
@@ -83,10 +67,9 @@ export default function Clients() {
       default_vat_rate: form.default_vat_rate || "0",
       default_unit_price: form.default_unit_price || "0",
     };
-    if (editing) await api.patch(`/clients/${editing.id}/`, payload);
-    else await api.post("/clients/", payload);
+    const { data } = await api.post("/clients/", payload);
     setOpen(false);
-    load();
+    navigate(`/clients/${data.id}/details`);
   };
 
   const remove = async (client) => {
@@ -117,7 +100,15 @@ export default function Clients() {
           <Paper
             key={c.id}
             variant="outlined"
-            sx={{ p: 1.5, display: "flex", alignItems: "center", gap: 2 }}
+            sx={{
+              p: 1.5,
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+              cursor: "pointer",
+              "&:hover": { bgcolor: "action.hover" },
+            }}
+            onClick={() => navigate(`/clients/${c.id}/details`)}
           >
             <BusinessIcon color="action" />
             <Box sx={{ flexGrow: 1, minWidth: 0 }}>
@@ -135,12 +126,17 @@ export default function Clients() {
                 {c.address ? ` · ${c.address}` : ""}
               </Typography>
             </Box>
-            <IconButton size="small" onClick={() => openEdit(c)}>
-              <EditIcon fontSize="small" />
-            </IconButton>
-            <IconButton size="small" color="error" onClick={() => remove(c)}>
+            <IconButton
+              size="small"
+              color="error"
+              onClick={(e) => {
+                e.stopPropagation();
+                remove(c);
+              }}
+            >
               <DeleteIcon fontSize="small" />
             </IconButton>
+            <ChevronRightIcon color="action" />
           </Paper>
         ))}
         {clients.length === 0 && (
@@ -149,7 +145,7 @@ export default function Clients() {
       </Stack>
 
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>{editing ? "Edit client" : "New client"}</DialogTitle>
+        <DialogTitle>New client</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField

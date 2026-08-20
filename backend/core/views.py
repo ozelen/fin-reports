@@ -1,13 +1,15 @@
 import datetime as dt
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
+from decimal import Decimal
 from pathlib import Path
 
 from django.core import serializers as dj_serializers
 from django.core.management.color import no_style
 from django.db import connection, transaction as db_transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, IntegerField, OuterRef, Q, Subquery, Sum
 from django.db.models.functions import (
+    Coalesce,
     TruncDay,
     TruncMonth,
     TruncQuarter,
@@ -29,9 +31,11 @@ from .export import build_workbook
 from .filters import TransactionFilter
 from .folders import descendants, folder_transaction_ids, own_transaction_ids, subtree
 from . import invoicing
-from .receipts import attach_new_transactions
+from .fx import Converter, _unique, series_eur, summarize_eur
+from .receipts import ingest_statement, set_item_tags
 from .models import (
     Account,
+    Budget,
     Client,
     Document,
     Folder,
@@ -50,6 +54,7 @@ from .serializers import (
     AccountSerializer,
     AiApplySerializer,
     AiClassifySerializer,
+    BudgetSerializer,
     BulkTagSerializer,
     ClientSerializer,
     DocumentSerializer,
@@ -57,11 +62,15 @@ from .serializers import (
     FolderTransactionsSerializer,
     InvoiceSerializer,
     IssuerProfileSerializer,
+    PurchaseItemSerializer,
+    ReceiptSerializer,
     RuleSerializer,
     TagSerializer,
     TransactionSerializer,
+    TransferSerializer,
     UploadSerializer,
 )
+from .accounts import book_transfer
 
 
 class UploadViewSet(
@@ -78,18 +87,16 @@ class UploadViewSet(
         return Upload.objects.filter(owner=self.request.user)
 
     def _resolve_account(self, request):
-        """Pick the account for this upload: the requested one, else the user's
-        default, else their first account (or None if they have none yet)."""
-        accounts = Account.objects.filter(owner=request.user)
+        """Pick the bank account for this upload: requested, else default, else first."""
+        banks = Account.objects.filter(owner=request.user, kind=Account.KIND_BANK)
         account_id = request.data.get("account")
         if account_id:
-            account = accounts.filter(id=account_id).first()
+            account = banks.filter(id=account_id).first()
             if account is not None:
                 return account
-        return (
-            accounts.filter(is_default=True).first()
-            or accounts.order_by("id").first()
-        )
+            if Account.objects.filter(owner=request.user, id=account_id).exists():
+                raise ValidationError({"account": "Statements go into a bank account."})
+        return banks.filter(is_default=True).first() or banks.order_by("id").first()
 
     def create(self, request, *args, **kwargs):
         file_obj = request.FILES.get("file")
@@ -120,37 +127,14 @@ class UploadViewSet(
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        meta = result["meta"]
-        rows = result["rows"]
-
-        upload.account_name = meta.get("account_name", "")
-        upload.account_iban = meta.get("account_iban", "")
-        upload.account_holder = meta.get("account_holder", "")
-        upload.currency = meta.get("currency", "EUR")
-        upload.row_count = len(rows)
-        upload.parsed_at = timezone.now()
-
-        objects = [
-            Transaction(owner=request.user, upload=upload, account=account, **row)
-            for row in rows
-        ]
-        Transaction.objects.bulk_create(objects, ignore_conflicts=True)
-        # ignore_conflicts makes counting unreliable across backends; recount.
-        upload.imported_count = Transaction.objects.filter(upload=upload).count()
-        upload.save()
-
-        rule_result = apply_rules(
-            request.user, Transaction.objects.filter(upload=upload)
-        )
-        receipts_attached = attach_new_transactions(
-            request.user, Transaction.objects.filter(upload=upload)
-        )
+        extra = ingest_statement(request.user, upload, account, result)
 
         serializer = self.get_serializer(upload)
         data = serializer.data
-        data["skipped_duplicates"] = upload.row_count - upload.imported_count
-        data["rule_assignments"] = rule_result["assignments_created"]
-        data["receipts_attached"] = receipts_attached
+        data["skipped_duplicates"] = extra["skipped"]
+        data["rule_assignments"] = extra["rule_assignments"]
+        data["receipts_attached"] = extra["receipts_attached"]
+        data["receipts_enriched"] = extra["receipts_enriched"]
         return Response(data, status=status.HTTP_201_CREATED)
 
 
@@ -171,49 +155,36 @@ class TransactionViewSet(
     ordering = ["-operation_date", "-id"]
 
     def get_queryset(self):
+        receipt_id = Subquery(
+            Receipt.objects.filter(transaction_id=OuterRef("pk"))
+            .order_by("id")
+            .values("id")[:1],
+            output_field=IntegerField(),
+        )
+        item_count = Coalesce(
+            Subquery(
+                PurchaseItem.objects.filter(transaction_id=OuterRef("pk"))
+                .order_by()
+                .values("transaction_id")
+                .annotate(c=Count("id"))
+                .values("c")[:1],
+                output_field=IntegerField(),
+            ),
+            0,
+        )
         return (
             Transaction.objects.filter(owner=self.request.user)
             .prefetch_related("tag_links__tag")
+            .annotate(
+                receipt_id=receipt_id,
+                item_count=item_count,
+            )
         )
 
     @action(detail=False, methods=["get"])
     def summary(self, request):
-        qs = self.filter_queryset(self.get_queryset())
-        by_currency = list(
-            qs.values("currency")
-            .annotate(
-                count=Count("id"),
-                income=Sum("amount", filter=Q(amount__gte=0)),
-                expense=Sum("amount", filter=Q(amount__lt=0)),
-            )
-            .order_by("currency")
-        )
-        currencies = [
-            {
-                "currency": row["currency"] or "EUR",
-                "count": row["count"] or 0,
-                "income": row["income"] or 0,
-                "expense": row["expense"] or 0,
-                "net": (row["income"] or 0) + (row["expense"] or 0),
-            }
-            for row in by_currency
-        ]
-        # Single-currency totals stay on the top-level fields for the UI.
-        # Mixed currencies must not be summed (UAH + EUR is meaningless).
-        if len(currencies) == 1:
-            only = currencies[0]
-            return Response({**only, "currencies": currencies, "mixed": False})
-        return Response(
-            {
-                "count": sum(c["count"] for c in currencies),
-                "income": None,
-                "expense": None,
-                "net": None,
-                "currency": None,
-                "currencies": currencies,
-                "mixed": True,
-            }
-        )
+        qs = _unique(self.filter_queryset(self.get_queryset()))
+        return Response(summarize_eur(qs))
 
     @action(detail=False, methods=["post"])
     def tag(self, request):
@@ -247,73 +218,129 @@ class TransactionViewSet(
     @action(detail=False, methods=["get"])
     def by_tag(self, request):
         """Aggregate the filtered transactions per tag for dashboard charts."""
-        qs = self.filter_queryset(self.get_queryset())
-        currency_codes = sorted(
-            {c for c in qs.values_list("currency", flat=True).distinct() if c}
-        )
-        mixed = len(currency_codes) > 1
-        display_currency = None if mixed else (currency_codes[0] if currency_codes else "EUR")
+        qs = _unique(self.filter_queryset(self.get_queryset()))
+        totals = summarize_eur(qs)
+        currency_codes = [c["currency"] for c in totals["currencies"]]
+        needs_fx = any(c.upper() != "EUR" for c in currency_codes)
+        conv = None
+        if needs_fx:
+            pairs = list(qs.values_list("operation_date", "currency"))
+            conv = Converter([d for d, _ in pairs], [c for _, c in pairs])
 
-        rows = (
-            TransactionTag.objects.filter(transaction__in=qs)
-            .values("tag_id", "tag__name", "tag__color")
-            .annotate(
-                count=Count("transaction_id", distinct=True),
-                income=Sum("transaction__amount", filter=Q(transaction__amount__gte=0)),
-                expense=Sum("transaction__amount", filter=Q(transaction__amount__lt=0)),
+        def as_eur(amount, currency, day, sign=1):
+            raw = amount or 0
+            if conv is None:
+                return float(raw) * sign
+            converted = conv.to_eur(raw, currency, day)
+            return float(converted) * sign if converted is not None else 0.0
+
+        split_ids = set(
+            PurchaseItem.objects.filter(
+                transaction__in=qs, tags__isnull=False
+            ).values_list("transaction_id", flat=True)
+        )
+        by_id = {}
+        counted = defaultdict(set)
+
+        def add(tag_id, name, color, amount, currency, day, tx_id):
+            eur = as_eur(amount, currency, day)
+            entry = by_id.setdefault(
+                tag_id,
+                {
+                    "id": tag_id,
+                    "name": name,
+                    "color": color,
+                    "count": 0,
+                    "income": 0.0,
+                    "expense": 0.0,
+                    "net": 0.0,
+                },
             )
-            .order_by()
+            if tx_id not in counted[tag_id]:
+                counted[tag_id].add(tx_id)
+                entry["count"] += 1
+            if eur >= 0:
+                entry["income"] += eur
+            else:
+                entry["expense"] += eur
+            entry["net"] = entry["income"] + entry["expense"]
+
+        # One transaction, one amount: split equally across its tags.
+        links = list(
+            TransactionTag.objects.filter(transaction__in=qs)
+            .exclude(transaction_id__in=split_ids)
+            .values(
+                "tag_id",
+                "tag__name",
+                "tag__color",
+                "transaction_id",
+                "transaction__amount",
+                "transaction__operation_date",
+                "transaction__currency",
+            )
         )
+        n_tags = Counter(r["transaction_id"] for r in links)
+        for r in links:
+            n = n_tags[r["transaction_id"]] or 1
+            share = (r["transaction__amount"] or 0) / n
+            add(
+                r["tag_id"],
+                r["tag__name"],
+                r["tag__color"],
+                share,
+                r["transaction__currency"],
+                r["transaction__operation_date"],
+                r["transaction_id"],
+            )
 
-        def money(value):
-            return float(value or 0)
+        # Mixed-cart receipts: give the whole check once, split by item-tag weight.
+        weights = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
+        tag_meta = {}
+        tx_meta = {}
+        for item in (
+            PurchaseItem.objects.filter(
+                transaction_id__in=split_ids, tags__isnull=False
+            )
+            .prefetch_related("tags")
+            .select_related("transaction")
+        ):
+            tx = item.transaction
+            if not tx:
+                continue
+            tx_meta[tx.id] = (tx.operation_date, tx.currency, tx.amount or 0)
+            for tag in item.tags.all():
+                weights[tx.id][tag.id] += item.amount or 0
+                tag_meta[tag.id] = (tag.name, tag.color)
+        for tx_id, tag_w in weights.items():
+            day, ccy, tx_amt = tx_meta[tx_id]
+            total_w = sum(tag_w.values()) or Decimal("1")
+            for tag_id, w in tag_w.items():
+                name, color = tag_meta[tag_id]
+                add(tag_id, name, color, tx_amt * (w / total_w), ccy, day, tx_id)
 
-        tags = [
-            {
-                "id": r["tag_id"],
-                "name": r["tag__name"],
-                "color": r["tag__color"],
-                "count": r["count"],
-                "income": money(r["income"]),
-                "expense": money(r["expense"]),
-                "net": money(r["income"]) + money(r["expense"]),
-            }
-            for r in rows
-        ]
-        tags.sort(key=lambda t: abs(t["net"]), reverse=True)
+        tags = sorted(by_id.values(), key=lambda t: abs(t["net"]), reverse=True)
 
-        untagged_qs = qs.filter(tag_links__isnull=True)
-        u = untagged_qs.aggregate(
-            count=Count("id"),
-            income=Sum("amount", filter=Q(amount__gte=0)),
-            expense=Sum("amount", filter=Q(amount__lt=0)),
-        )
+        u = summarize_eur(qs.filter(tag_links__isnull=True))
         untagged = {
             "count": u["count"] or 0,
-            "income": money(u["income"]),
-            "expense": money(u["expense"]),
-            "net": money(u["income"]) + money(u["expense"]),
-        }
-
-        t = qs.aggregate(
-            count=Count("id"),
-            income=Sum("amount", filter=Q(amount__gte=0)),
-            expense=Sum("amount", filter=Q(amount__lt=0)),
-        )
-        totals = {
-            "count": t["count"] or 0,
-            "income": None if mixed else money(t["income"]),
-            "expense": None if mixed else money(t["expense"]),
-            "net": None if mixed else money(t["income"]) + money(t["expense"]),
-            "currency": display_currency,
+            "income": u["income"] or 0,
+            "expense": u["expense"] or 0,
+            "net": (u["income"] or 0) + (u["expense"] or 0),
         }
 
         return Response(
             {
                 "tags": tags,
                 "untagged": untagged,
-                "totals": totals,
-                "mixed": mixed,
+                "totals": {
+                    "count": totals["count"],
+                    "income": totals["income"],
+                    "expense": totals["expense"],
+                    "net": totals["net"],
+                    "currency": totals["currency"],
+                },
+                "mixed": totals["mixed"],
+                "converted": totals["converted"],
                 "currencies": currency_codes,
             }
         )
@@ -323,24 +350,25 @@ class TransactionViewSet(
         """Income/expense/net per time bucket for the dashboard line chart.
 
         ``granularity`` may be day/week/month/quarter/year.
-        Refuses to series-sum when the filter spans multiple currencies.
+        Non-EUR amounts are converted at the NBU rate on operation_date.
         """
-        qs = self.filter_queryset(self.get_queryset())
-        currency_codes = sorted(
-            {c for c in qs.values_list("currency", flat=True).distinct() if c}
-        )
-        mixed = len(currency_codes) > 1
-        if mixed:
+        qs = _unique(self.filter_queryset(self.get_queryset()))
+        granularity = (request.query_params.get("granularity") or "month").lower()
+        fx_series = series_eur(qs, granularity)
+        if fx_series is not None:
             return Response(
                 {
-                    "granularity": request.query_params.get("granularity") or "month",
-                    "series": [],
-                    "mixed": True,
-                    "currencies": currency_codes,
+                    "granularity": granularity,
+                    "series": fx_series["series"],
+                    "mixed": fx_series["mixed"],
+                    "converted": fx_series["converted"],
+                    "currencies": fx_series["currencies"],
                 }
             )
 
-        granularity = (request.query_params.get("granularity") or "month").lower()
+        currency_codes = sorted(
+            {c for c in qs.values_list("currency", flat=True).distinct() if c}
+        )
         trunc = {
             "day": TruncDay,
             "week": TruncWeek,
@@ -379,6 +407,7 @@ class TransactionViewSet(
                 "granularity": granularity,
                 "series": series,
                 "mixed": False,
+                "converted": False,
                 "currencies": currency_codes,
             }
         )
@@ -392,6 +421,9 @@ class AccountViewSet(viewsets.ModelViewSet):
         group = self.request.query_params.get("group")
         if group:
             qs = qs.filter(group=group)
+        kind = self.request.query_params.get("kind")
+        if kind:
+            qs = qs.filter(kind=kind)
         return qs
 
     def perform_create(self, serializer):
@@ -404,6 +436,12 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     def _sync_defaults(self, account):
         """Keep at most one upload-default and one invoice-default per owner."""
+        if account.kind != Account.KIND_BANK:
+            if account.is_default or account.is_invoice_default:
+                Account.objects.filter(pk=account.pk).update(
+                    is_default=False, is_invoice_default=False
+                )
+            return
         if account.is_default:
             Account.objects.filter(owner=account.owner).exclude(
                 id=account.id
@@ -412,6 +450,29 @@ class AccountViewSet(viewsets.ModelViewSet):
             Account.objects.filter(owner=account.owner).exclude(
                 id=account.id
             ).update(is_invoice_default=False)
+
+    @action(detail=False, methods=["post"])
+    def transfer(self, request):
+        serializer = TransferSerializer(
+            data=request.data, context=self.get_serializer_context()
+        )
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        src, dst = book_transfer(
+            request.user,
+            data["from_account"],
+            data["to_account"],
+            data["amount"],
+            data["operation_date"],
+            data.get("concept") or "",
+        )
+        return Response(
+            {
+                "from": AccountSerializer(src).data,
+                "to": AccountSerializer(dst).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class IssuerProfileView(APIView):
@@ -486,6 +547,45 @@ class DocumentViewSet(viewsets.ModelViewSet):
             raise ValidationError({"detail": "No file on this document."})
         filename = doc.original_filename or Path(doc.file.name).name
         return FileResponse(doc.file.open("rb"), as_attachment=True, filename=filename)
+
+
+class ReceiptViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    serializer_class = ReceiptSerializer
+
+    def get_queryset(self):
+        return (
+            Receipt.objects.filter(owner=self.request.user)
+            .prefetch_related("items__tags")
+        )
+
+    @action(detail=True, methods=["get"])
+    def download(self, request, pk=None):
+        receipt = self.get_object()
+        if not receipt.file:
+            raise ValidationError({"detail": "No file on this receipt."})
+        filename = receipt.original_filename or Path(receipt.file.name).name
+        return FileResponse(receipt.file.open("rb"), filename=filename)
+
+
+class PurchaseItemViewSet(mixins.UpdateModelMixin, viewsets.GenericViewSet):
+    serializer_class = PurchaseItemSerializer
+
+    def get_queryset(self):
+        return PurchaseItem.objects.filter(receipt__owner=self.request.user).prefetch_related(
+            "tags"
+        )
+
+    @action(detail=True, methods=["post"])
+    def tag(self, request, pk=None):
+        item = self.get_object()
+        add_ids = request.data.get("add") or []
+        remove_ids = {int(i) for i in (request.data.get("remove") or [])}
+        tags = {t.id: t for t in item.tags.all() if t.id not in remove_ids}
+        for tag in Tag.objects.filter(owner=request.user, id__in=add_ids):
+            tags[tag.id] = tag
+        set_item_tags(item, tags.values())
+        item = self.get_queryset().get(pk=item.pk)
+        return Response(self.get_serializer(item).data)
 
 
 class InvoiceViewSet(viewsets.ModelViewSet):
@@ -714,6 +814,31 @@ class TagViewSet(viewsets.ModelViewSet):
         if page is not None:
             return self.get_paginated_response(serializer.data)
         return Response(serializer.data)
+
+
+class BudgetViewSet(viewsets.ModelViewSet):
+    serializer_class = BudgetSerializer
+
+    def get_queryset(self):
+        return Budget.objects.filter(owner=self.request.user).select_related(
+            "tag", "account"
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+    @action(detail=False, methods=["get"])
+    def status(self, request):
+        raw = request.query_params.get("as_of")
+        as_of = None
+        if raw:
+            try:
+                as_of = dt.date.fromisoformat(raw)
+            except ValueError as exc:
+                raise ValidationError({"as_of": "Use YYYY-MM-DD."}) from exc
+        from .budgets import status as budget_status
+
+        return Response(budget_status(request.user, as_of))
 
 
 class RuleViewSet(viewsets.ModelViewSet):
@@ -989,6 +1114,7 @@ BACKUP_MODELS = [
     Client,
     Document,
     Tag,
+    Budget,
     Rule,
     Upload,
     Transaction,
@@ -1011,6 +1137,7 @@ class BackupExportView(APIView):
             Client.objects.filter(owner=user),
             Document.objects.filter(owner=user),
             Tag.objects.filter(owner=user),
+            Budget.objects.filter(owner=user),
             Rule.objects.filter(owner=user),
             Upload.objects.filter(owner=user),
             Transaction.objects.filter(owner=user),
@@ -1063,6 +1190,7 @@ class BackupImportView(APIView):
                 Rule.objects.filter(owner=user).delete()
                 Transaction.objects.filter(owner=user).delete()
                 Upload.objects.filter(owner=user).delete()
+                Budget.objects.filter(owner=user).delete()
                 Tag.objects.filter(owner=user).delete()
                 Document.objects.filter(owner=user).delete()
                 Client.objects.filter(owner=user).delete()
