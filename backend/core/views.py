@@ -914,7 +914,7 @@ class RecurrenceViewSet(viewsets.ModelViewSet):
         from .recurrences import forecast
 
         recs = list(self.get_queryset())
-        return Response(forecast(recs))
+        return Response(forecast(request.user, recs))
 
     @action(detail=True, methods=["get"])
     def transactions(self, request, pk=None):

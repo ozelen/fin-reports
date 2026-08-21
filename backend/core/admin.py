@@ -31,6 +31,7 @@ class AccountAdmin(admin.ModelAdmin):
         "group",
         "currency",
         "balance",
+        "credit_limit",
         "is_default",
         "is_invoice_default",
         "owner",

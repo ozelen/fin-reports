@@ -35,6 +35,8 @@ const BLANK = {
   bank_address: "",
   currency: "EUR",
   balance: "0",
+  credit_limit: "",
+  is_credit: false,
   group: "family",
   is_default: false,
   is_invoice_default: false,
@@ -112,6 +114,8 @@ export default function Accounts() {
       bank_address: account.bank_address || "",
       currency: account.currency || "EUR",
       balance: account.balance ?? "0",
+      credit_limit: account.credit_limit ?? "",
+      is_credit: Boolean(account.credit_limit),
       group: account.group || "family",
       is_default: account.is_default,
       is_invoice_default: account.is_invoice_default,
@@ -119,12 +123,16 @@ export default function Accounts() {
     setOpen(true);
   };
 
-  const payload = () => ({
-    ...form,
-    balance: form.balance === "" ? "0" : form.balance,
-    is_default: form.kind === "bank" && form.is_default,
-    is_invoice_default: form.kind === "bank" && form.is_invoice_default,
-  });
+  const payload = () => {
+    const { is_credit, ...fields } = form;
+    return {
+      ...fields,
+      balance: form.balance === "" ? "0" : form.balance,
+      credit_limit: is_credit && form.credit_limit !== "" ? form.credit_limit : null,
+      is_default: form.kind === "bank" && form.is_default,
+      is_invoice_default: form.kind === "bank" && form.is_invoice_default,
+    };
+  };
 
   const save = async () => {
     if (editing) await api.patch(`/accounts/${editing.id}/`, payload());
@@ -236,6 +244,9 @@ export default function Accounts() {
                                 {a.is_invoice_default && (
                                   <Chip size="small" color="secondary" label="Invoice default" />
                                 )}
+                                {a.credit_limit && (
+                                  <Chip size="small" variant="outlined" label="Credit card" />
+                                )}
                                 <Chip size="small" variant="outlined" label={a.currency} />
                               </Stack>
                               <Typography variant="body2" color="text.secondary">
@@ -245,21 +256,27 @@ export default function Accounts() {
                                   : KIND_LABELS[a.kind] || a.kind}
                               </Typography>
                             </Box>
-                            <Typography
-                              sx={{
-                                fontWeight: 700,
-                                minWidth: 120,
-                                textAlign: "right",
-                                color:
-                                  Number(a.balance) < 0
-                                    ? "error.main"
-                                    : Number(a.balance) > 0
-                                      ? "success.main"
-                                      : "text.secondary",
-                              }}
-                            >
-                              {money(a.balance, a.currency)}
-                            </Typography>
+                            <Box sx={{ minWidth: 140, textAlign: "right" }}>
+                              <Typography
+                                sx={{
+                                  fontWeight: 700,
+                                  color:
+                                    Number(a.effective_balance ?? a.balance) < 0
+                                      ? "error.main"
+                                      : Number(a.effective_balance ?? a.balance) > 0
+                                        ? "success.main"
+                                        : "text.secondary",
+                                }}
+                              >
+                                {money(a.effective_balance ?? a.balance, a.currency)}
+                              </Typography>
+                              {a.credit_limit && (
+                                <Typography variant="caption" color="text.secondary">
+                                  available {money(a.balance, a.currency)} of{" "}
+                                  {money(a.credit_limit, a.currency)}
+                                </Typography>
+                              )}
+                            </Box>
                             <Chip size="small" variant="outlined" label={`${a.transaction_count} tx`} />
                             <IconButton size="small" onClick={() => openEdit(a)}>
                               <EditIcon fontSize="small" />
@@ -379,11 +396,34 @@ export default function Accounts() {
               helperText={
                 form.kind === "debt"
                   ? "Positive: they owe you. Negative: you owe them."
-                  : form.kind === "bank"
-                    ? "Filled from the last statement row. You can override."
-                    : ""
+                  : form.is_credit
+                    ? "Available credit from the last statement. Real balance = available − limit."
+                    : form.kind === "bank"
+                      ? "Filled from the last statement row. You can override."
+                      : ""
               }
             />
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={form.is_credit}
+                  onChange={(e) =>
+                    setForm({ ...form, is_credit: e.target.checked })
+                  }
+                />
+              }
+              label="Credit card (statement shows available credit)"
+            />
+            {form.is_credit && (
+              <TextField
+                label="Credit limit"
+                type="number"
+                value={form.credit_limit}
+                onChange={(e) => setForm({ ...form, credit_limit: e.target.value })}
+                fullWidth
+                helperText="Real balance = available credit − this limit (shown as negative when you owe)."
+              />
+            )}
             {isBank && (
               <>
                 <FormControlLabel
@@ -431,7 +471,7 @@ export default function Accounts() {
             >
               {accounts.map((a) => (
                 <MenuItem key={a.id} value={a.id}>
-                  {a.name} ({money(a.balance, a.currency)})
+                  {a.name} ({money(a.effective_balance ?? a.balance, a.currency)})
                 </MenuItem>
               ))}
             </TextField>
@@ -444,7 +484,7 @@ export default function Accounts() {
             >
               {accounts.map((a) => (
                 <MenuItem key={a.id} value={a.id}>
-                  {a.name} ({money(a.balance, a.currency)})
+                  {a.name} ({money(a.effective_balance ?? a.balance, a.currency)})
                 </MenuItem>
               ))}
             </TextField>

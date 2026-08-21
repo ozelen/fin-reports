@@ -238,6 +238,27 @@ export default function Recurring() {
 
   const next = forecast?.next_month;
   const rest = forecast?.this_month;
+  const leftoverHint = forecast?.converted
+    ? "Converted to EUR"
+    : forecast?.missing_fx
+      ? "Some amounts skipped (no FX rate)"
+      : "EUR";
+  const leftoverRows = [
+    ...(forecast?.accounts || []),
+    ...(forecast?.unassigned?.this_month?.count || forecast?.unassigned?.next_month?.count
+      ? [
+          {
+            id: "unassigned",
+            name: "No account",
+            effective_eur: null,
+            this_month: forecast.unassigned.this_month,
+            next_month: forecast.unassigned.next_month,
+          },
+        ]
+      : []),
+  ];
+  const leftoverColor = (v) =>
+    v == null ? "text.secondary" : v < 0 ? "error.main" : v > 0 ? "success.main" : "text.secondary";
 
   return (
     <Box>
@@ -263,18 +284,79 @@ export default function Recurring() {
           <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap", mb: 2 }} useFlexGap>
             <Kpi label="Income" value={currency(next?.income)} color="success.main" />
             <Kpi label="Expenses" value={currency(next?.expense)} color="error.main" />
+            <Kpi label="Net" value={currency(next?.net)} hint={leftoverHint} />
+          </Stack>
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>
+            Leftover balance (EUR)
+          </Typography>
+          <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap", mb: 2 }} useFlexGap>
             <Kpi
-              label="Net"
-              value={currency(next?.net)}
-              hint={
-                next?.converted
-                  ? "Converted to EUR"
-                  : next?.missing_fx
-                    ? "Some amounts skipped (no FX rate)"
-                    : "EUR"
-              }
+              label="Now"
+              value={currency(forecast.current_eur)}
+              color={leftoverColor(forecast.current_eur)}
+            />
+            <Kpi
+              label={`End of ${monthLabel(rest?.start)}`}
+              value={currency(rest?.leftover_eur)}
+              color={leftoverColor(rest?.leftover_eur)}
+            />
+            <Kpi
+              label={`End of ${monthLabel(next?.start)}`}
+              value={currency(next?.leftover_eur)}
+              color={leftoverColor(next?.leftover_eur)}
+              hint={leftoverHint}
             />
           </Stack>
+          {leftoverRows.length > 0 && (
+            <Paper variant="outlined" sx={{ mb: 2 }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Account</TableCell>
+                    <TableCell align="right">Now</TableCell>
+                    <TableCell align="right">This month</TableCell>
+                    <TableCell align="right">Next month</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {leftoverRows.map((row) => (
+                    <TableRow key={row.id}>
+                      <TableCell>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {row.name}
+                        </Typography>
+                        {row.credit_limit ? (
+                          <Typography variant="caption" color="text.secondary">
+                            Credit · available {currency(row.balance, row.currency)} of{" "}
+                            {currency(row.credit_limit, row.currency)}
+                          </Typography>
+                        ) : row.currency && row.currency !== "EUR" && row.effective != null ? (
+                          <Typography variant="caption" color="text.secondary">
+                            {currency(row.effective, row.currency)}
+                          </Typography>
+                        ) : null}
+                      </TableCell>
+                      <TableCell align="right" sx={{ color: leftoverColor(row.effective_eur), fontWeight: 600 }}>
+                        {row.effective_eur == null ? "—" : currency(row.effective_eur)}
+                      </TableCell>
+                      <TableCell
+                        align="right"
+                        sx={{ color: leftoverColor(row.this_month?.leftover_eur), fontWeight: 600 }}
+                      >
+                        {currency(row.this_month?.leftover_eur)}
+                      </TableCell>
+                      <TableCell
+                        align="right"
+                        sx={{ color: leftoverColor(row.next_month?.leftover_eur), fontWeight: 600 }}
+                      >
+                        {currency(row.next_month?.leftover_eur)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Paper>
+          )}
         </>
       )}
 

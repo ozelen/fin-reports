@@ -5,7 +5,7 @@ import calendar
 import datetime as dt
 from decimal import Decimal
 
-from .models import Recurrence, Transaction, TransactionTag
+from .models import Account, Recurrence, Transaction, TransactionTag
 from .receipts import merchant_overlap
 
 DATE_WINDOWS = {
@@ -340,53 +340,136 @@ def _money(value):
     return float(value)
 
 
-def forecast(recs, today: dt.date | None = None) -> dict:
-    """EUR remaining for the rest of this month and all of next month."""
+def forecast(user, recs, today: dt.date | None = None) -> dict:
+    """EUR remaining cashflow and leftover balances this / next month."""
     today = today or dt.date.today()
     this_end = month_bounds(today.year, today.month)[1]
     next_start, next_end = next_month_bounds(today)
     active = [r for r in recs if r.is_active]
     from .fx import Converter
 
+    accounts = list(Account.objects.filter(owner=user))
     conv = Converter(
         [today, next_start],
-        [r.currency for r in active] or ["EUR"],
+        [a.currency for a in accounts] + [r.currency for r in active] or ["EUR"],
     )
 
-    def bucket(start: dt.date, end: dt.date) -> dict:
-        income = Decimal("0")
-        expense = Decimal("0")
-        converted = False
-        missing = False
-        count = 0
-        for rec in active:
-            dates, amt = window_remaining(rec, start, end)
-            if not dates:
-                continue
-            count += len(dates)
-            eur = conv.to_eur(amt, rec.currency or "EUR", start)
-            if (rec.currency or "EUR").upper() != "EUR":
-                converted = True
-            if eur is None:
-                missing = True
-                continue
-            if eur >= 0:
-                income += eur
-            else:
-                expense += eur
+    def add_flow(bucket: dict, rec: Recurrence, start: dt.date, end: dt.date):
+        dates, amt = window_remaining(rec, start, end)
+        if not dates:
+            return
+        bucket["count"] += len(dates)
+        eur = conv.to_eur(amt, rec.currency or "EUR", start)
+        if (rec.currency or "EUR").upper() != "EUR":
+            bucket["converted"] = True
+        if eur is None:
+            bucket["missing_fx"] = True
+            return
+        if eur >= 0:
+            bucket["income"] += eur
+        else:
+            bucket["expense"] += eur
+
+    def empty_flow():
+        return {
+            "count": 0,
+            "income": Decimal("0"),
+            "expense": Decimal("0"),
+            "converted": False,
+            "missing_fx": False,
+        }
+
+    def serialize_flow(bucket: dict, start: dt.date, end: dt.date, leftover_eur) -> dict:
+        net = bucket["income"] + bucket["expense"]
         return {
             "start": start.isoformat(),
             "end": end.isoformat(),
-            "count": count,
-            "income": _money(income),
-            "expense": _money(expense),
-            "net": _money(income + expense),
-            "converted": converted,
-            "missing_fx": missing,
+            "count": bucket["count"],
+            "income": _money(bucket["income"]),
+            "expense": _money(bucket["expense"]),
+            "net": _money(net),
+            "leftover_eur": _money(leftover_eur),
+            "converted": bucket["converted"],
+            "missing_fx": bucket["missing_fx"],
         }
+
+    this_all = empty_flow()
+    next_all = empty_flow()
+    by_id = {a.id: {"this": empty_flow(), "next": empty_flow()} for a in accounts}
+    unassigned = {"this": empty_flow(), "next": empty_flow()}
+
+    for rec in active:
+        add_flow(this_all, rec, today, this_end)
+        add_flow(next_all, rec, next_start, next_end)
+        dest = by_id.get(rec.account_id) if rec.account_id else None
+        dest = dest or unassigned
+        add_flow(dest["this"], rec, today, this_end)
+        add_flow(dest["next"], rec, next_start, next_end)
+
+    current_eur = Decimal("0")
+    converted = False
+    missing = False
+    account_rows = []
+    for account in accounts:
+        native = account.effective_balance or Decimal("0")
+        ccy = account.currency or "EUR"
+        eur = conv.to_eur(native, ccy, today)
+        if ccy.upper() != "EUR":
+            converted = True
+        if eur is None:
+            missing = True
+            eur_val = Decimal("0")
+        else:
+            current_eur += eur
+            eur_val = eur
+        flows = by_id[account.id]
+        this_left = eur_val + flows["this"]["income"] + flows["this"]["expense"]
+        next_left = this_left + flows["next"]["income"] + flows["next"]["expense"]
+        account_rows.append(
+            {
+                "id": account.id,
+                "name": account.name,
+                "kind": account.kind,
+                "currency": ccy,
+                "balance": _money(account.balance or 0),
+                "credit_limit": _money(account.credit_limit),
+                "effective": _money(native),
+                "effective_eur": _money(eur),
+                "this_month": serialize_flow(flows["this"], today, this_end, this_left),
+                "next_month": serialize_flow(
+                    flows["next"], next_start, next_end, next_left
+                ),
+            }
+        )
+
+    this_net = this_all["income"] + this_all["expense"]
+    next_net = next_all["income"] + next_all["expense"]
+    this_left = current_eur + this_net
+    next_left = this_left + next_net
 
     return {
         "as_of": today.isoformat(),
-        "this_month": bucket(today, this_end),
-        "next_month": bucket(next_start, next_end),
+        "this_month": serialize_flow(this_all, today, this_end, this_left),
+        "next_month": serialize_flow(next_all, next_start, next_end, next_left),
+        "current_eur": _money(current_eur),
+        "converted": converted or this_all["converted"] or next_all["converted"],
+        "missing_fx": missing or this_all["missing_fx"] or next_all["missing_fx"],
+        "accounts": account_rows,
+        "unassigned": {
+            "this_month": serialize_flow(
+                unassigned["this"],
+                today,
+                this_end,
+                unassigned["this"]["income"] + unassigned["this"]["expense"],
+            ),
+            "next_month": serialize_flow(
+                unassigned["next"],
+                next_start,
+                next_end,
+                unassigned["this"]["income"]
+                + unassigned["this"]["expense"]
+                + unassigned["next"]["income"]
+                + unassigned["next"]["expense"],
+            ),
+        },
     }

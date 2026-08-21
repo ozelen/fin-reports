@@ -41,6 +41,9 @@ class AccountSerializer(serializers.ModelSerializer):
     transaction_count = serializers.IntegerField(
         source="transactions.count", read_only=True
     )
+    effective_balance = serializers.DecimalField(
+        max_digits=14, decimal_places=2, read_only=True
+    )
 
     class Meta:
         model = Account
@@ -55,19 +58,29 @@ class AccountSerializer(serializers.ModelSerializer):
             "bank_address",
             "currency",
             "balance",
+            "credit_limit",
+            "effective_balance",
             "group",
             "is_default",
             "is_invoice_default",
             "transaction_count",
             "created_at",
         ]
-        read_only_fields = ["id", "transaction_count", "created_at"]
+        read_only_fields = [
+            "id",
+            "transaction_count",
+            "effective_balance",
+            "created_at",
+        ]
 
     def validate(self, attrs):
         kind = attrs.get("kind") or getattr(self.instance, "kind", Account.KIND_BANK)
         if kind != Account.KIND_BANK:
             attrs["is_default"] = False
             attrs["is_invoice_default"] = False
+        limit = attrs.get("credit_limit", getattr(self.instance, "credit_limit", None))
+        if limit is not None and limit <= 0:
+            attrs["credit_limit"] = None
         return attrs
 
 

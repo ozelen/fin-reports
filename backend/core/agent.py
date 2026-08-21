@@ -621,7 +621,15 @@ def _run_tool(user, name: str, args: dict) -> dict:
     if name == "list_accounts":
         rows = list(
             Account.objects.filter(owner=user).values(
-                "id", "name", "kind", "bank", "currency", "group", "iban", "balance"
+                "id",
+                "name",
+                "kind",
+                "bank",
+                "currency",
+                "group",
+                "iban",
+                "balance",
+                "credit_limit",
             )
         )
         return {"accounts": rows}

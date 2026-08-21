@@ -30,6 +30,13 @@ class Account(models.Model):
     bank_address = models.CharField(max_length=255, blank=True)
     currency = models.CharField(max_length=8, default="EUR")
     balance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    credit_limit = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="If set, stored balance is available credit; real = balance − limit.",
+    )
     group = models.CharField(
         max_length=20, choices=GROUP_CHOICES, default=GROUP_FAMILY
     )
@@ -45,6 +52,17 @@ class Account(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def effective_balance(self):
+        """Owed-as-negative when `credit_limit` is set (available credit on the statement)."""
+        from decimal import Decimal
+
+        bal = self.balance or Decimal("0")
+        limit = self.credit_limit
+        if limit in (None, Decimal("0")):
+            return bal
+        return bal - limit
 
     def invoice_snapshot(self) -> dict:
         """Bank requisites copied onto an invoice at issue time."""

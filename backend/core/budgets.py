@@ -18,7 +18,7 @@ def _money(value):
 
 
 def account_balances(user):
-    """Stored balance per account (statement last row, then manual edits/transfers)."""
+    """Effective balance per account (credit cards: available − limit)."""
     accounts = list(Account.objects.filter(owner=user))
     if not accounts:
         return [], _ZERO, False
@@ -28,7 +28,7 @@ def account_balances(user):
     total = _ZERO
     converted = False
     for account in accounts:
-        native = account.balance or _ZERO
+        native = account.effective_balance or _ZERO
         ccy = account.currency or "EUR"
         eur = conv.to_eur(native, ccy, today)
         if eur is not None:
@@ -40,7 +40,9 @@ def account_balances(user):
                 "id": account.id,
                 "name": account.name,
                 "kind": account.kind,
-                "balance": _money(native),
+                "balance": _money(account.balance or _ZERO),
+                "credit_limit": _money(account.credit_limit),
+                "effective": _money(native),
                 "currency": ccy,
                 "eur": _money(eur),
             }
