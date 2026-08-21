@@ -193,6 +193,119 @@ class Rule(models.Model):
         return self.name
 
 
+class Recurrence(models.Model):
+    FREQ_WEEK = "week"
+    FREQ_MONTH = "month"
+    FREQ_QUARTER = "quarter"
+    FREQ_YEAR = "year"
+    FREQ_CHOICES = [
+        (FREQ_WEEK, "Weekly"),
+        (FREQ_MONTH, "Monthly"),
+        (FREQ_QUARTER, "Quarterly"),
+        (FREQ_YEAR, "Yearly"),
+    ]
+    CAT_TAX = "tax"
+    CAT_LOAN = "loan"
+    CAT_SUBSCRIPTION = "subscription"
+    CAT_INCOME = "income"
+    CAT_OTHER = "other"
+    CAT_CHOICES = [
+        (CAT_TAX, "Tax"),
+        (CAT_LOAN, "Loan"),
+        (CAT_SUBSCRIPTION, "Subscription"),
+        (CAT_INCOME, "Income"),
+        (CAT_OTHER, "Other"),
+    ]
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="recurrences"
+    )
+    name = models.CharField(max_length=120)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=8, default="EUR")
+    frequency = models.CharField(
+        max_length=8, choices=FREQ_CHOICES, default=FREQ_MONTH
+    )
+    due_day = models.SmallIntegerField(
+        default=1,
+        help_text="Weekday 0–6 (Mon–Sun) for weekly; day of month 1–31 otherwise.",
+    )
+    start_date = models.DateField()
+    end_date = models.DateField(null=True, blank=True)
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recurrences",
+    )
+    match_text = models.CharField(max_length=255, blank=True)
+    amount_tolerance_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, default=10
+    )
+    auto_match = models.BooleanField(default=True)
+    category = models.CharField(
+        max_length=16, choices=CAT_CHOICES, default=CAT_OTHER
+    )
+    is_active = models.BooleanField(default=True)
+    tags = models.ManyToManyField(Tag, related_name="recurrences", blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return self.name
+
+
+class TaxProfile(models.Model):
+    METHOD_130 = "modelo_130"
+    METHOD_CHOICES = [(METHOD_130, "Modelo 130")]
+    INCOME_INVOICES = "invoices"
+    INCOME_TAGS = "tags"
+    INCOME_CHOICES = [
+        (INCOME_INVOICES, "Issued invoices"),
+        (INCOME_TAGS, "Tagged bank income"),
+    ]
+    SS_TABLE = "table"
+    SS_FIXED = "fixed"
+    SS_CHOICES = [
+        (SS_TABLE, "RETA tramos"),
+        (SS_FIXED, "Fixed cuota"),
+    ]
+
+    owner = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="tax_profile",
+    )
+    irpf_method = models.CharField(
+        max_length=16, choices=METHOD_CHOICES, default=METHOD_130
+    )
+    withholding_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0
+    )
+    simplificada = models.BooleanField(default=True)
+    income_from = models.CharField(
+        max_length=12, choices=INCOME_CHOICES, default=INCOME_INVOICES
+    )
+    ss_mode = models.CharField(max_length=8, choices=SS_CHOICES, default=SS_TABLE)
+    ss_cuota_override = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    new_autonomo_start = models.DateField(null=True, blank=True)
+    planned_income_override = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    deductible_tags = models.ManyToManyField(
+        Tag, related_name="tax_profiles", blank=True
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"tax profile {self.owner_id}"
+
+
 class Transaction(models.Model):
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="transactions"
@@ -211,6 +324,13 @@ class Transaction(models.Model):
         null=True,
         blank=True,
         related_name="transactions",
+    )
+    recurrence = models.ForeignKey(
+        Recurrence,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="occurrences",
     )
     operation_date = models.DateField()
     value_date = models.DateField(null=True, blank=True)
@@ -273,10 +393,12 @@ class TransactionTag(models.Model):
     SOURCE_MANUAL = "manual"
     SOURCE_RULE = "rule"
     SOURCE_AI = "ai"
+    SOURCE_SCHEDULE = "schedule"
     SOURCE_CHOICES = [
         (SOURCE_MANUAL, "Manual"),
         (SOURCE_RULE, "Rule"),
         (SOURCE_AI, "AI"),
+        (SOURCE_SCHEDULE, "Schedule"),
     ]
 
     transaction = models.ForeignKey(

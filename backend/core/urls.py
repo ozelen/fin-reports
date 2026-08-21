@@ -15,8 +15,11 @@ from .views import (
     IssuerProfileView,
     PurchaseItemViewSet,
     ReceiptViewSet,
+    RecurrenceViewSet,
     RuleViewSet,
     TagViewSet,
+    TaxEstimateView,
+    TaxProfileView,
     TransactionViewSet,
     UploadViewSet,
 )
@@ -35,6 +38,7 @@ router.register("documents", DocumentViewSet, basename="document")
 router.register("invoices", InvoiceViewSet, basename="invoice")
 router.register("receipts", ReceiptViewSet, basename="receipt")
 router.register("purchase-items", PurchaseItemViewSet, basename="purchase-item")
+router.register("recurrences", RecurrenceViewSet, basename="recurrence")
 
 urlpatterns = [
     path("auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
@@ -42,5 +46,7 @@ urlpatterns = [
     path("backup/export/", BackupExportView.as_view(), name="backup_export"),
     path("backup/import/", BackupImportView.as_view(), name="backup_import"),
     path("issuer/", IssuerProfileView.as_view(), name="issuer_profile"),
+    path("tax/profile/", TaxProfileView.as_view(), name="tax_profile"),
+    path("tax/estimate/", TaxEstimateView.as_view(), name="tax_estimate"),
     path("", include(router.urls)),
 ]

@@ -43,8 +43,10 @@ from .models import (
     IssuerProfile,
     PurchaseItem,
     Receipt,
+    Recurrence,
     Rule,
     Tag,
+    TaxProfile,
     Transaction,
     TransactionTag,
     Upload,
@@ -60,12 +62,16 @@ from .serializers import (
     DocumentSerializer,
     FolderSerializer,
     FolderTransactionsSerializer,
+    FromTransactionSerializer,
     InvoiceSerializer,
     IssuerProfileSerializer,
     PurchaseItemSerializer,
     ReceiptSerializer,
+    RecurrenceAttachSerializer,
+    RecurrenceSerializer,
     RuleSerializer,
     TagSerializer,
+    TaxProfileSerializer,
     TransactionSerializer,
     TransferSerializer,
     UploadSerializer,
@@ -174,6 +180,7 @@ class TransactionViewSet(
         )
         return (
             Transaction.objects.filter(owner=self.request.user)
+            .select_related("account", "recurrence")
             .prefetch_related("tag_links__tag")
             .annotate(
                 receipt_id=receipt_id,
@@ -841,6 +848,170 @@ class BudgetViewSet(viewsets.ModelViewSet):
         return Response(budget_status(request.user, as_of))
 
 
+class RecurrenceViewSet(viewsets.ModelViewSet):
+    serializer_class = RecurrenceSerializer
+
+    def get_queryset(self):
+        return Recurrence.objects.filter(owner=self.request.user).prefetch_related(
+            "tags", "occurrences"
+        )
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        recs = getattr(self, "_stats_recs", None)
+        if recs is not None:
+            from .recurrences import stats_map
+
+            ctx["stats"] = stats_map(recs)
+        return ctx
+
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(qs)
+        recs = list(page if page is not None else qs)
+        self._stats_recs = recs
+        serializer = self.get_serializer(recs, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
+
+    def retrieve(self, request, *args, **kwargs):
+        rec = self.get_object()
+        self._stats_recs = [rec]
+        return Response(self.get_serializer(rec).data)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+    @action(detail=False, methods=["post"])
+    def from_transaction(self, request):
+        from .recurrences import seed_from_transaction
+
+        ser = FromTransactionSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        tx = Transaction.objects.filter(
+            owner=request.user, id=data["transaction_id"]
+        ).first()
+        if tx is None:
+            raise ValidationError({"transaction_id": "Unknown transaction."})
+        overrides = {
+            k: v
+            for k, v in data.items()
+            if k != "transaction_id" and v is not None and v != ""
+        }
+        if "tags" in overrides:
+            overrides["tags"] = Tag.objects.filter(
+                owner=request.user, id__in=overrides["tags"]
+            )
+        rec = seed_from_transaction(tx, **overrides)
+        rec = self.get_queryset().get(pk=rec.pk)
+        self._stats_recs = [rec]
+        return Response(self.get_serializer(rec).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def forecast(self, request):
+        from .recurrences import forecast
+
+        recs = list(self.get_queryset())
+        return Response(forecast(recs))
+
+    @action(detail=True, methods=["get"])
+    def transactions(self, request, pk=None):
+        rec = self.get_object()
+        qs = (
+            Transaction.objects.filter(owner=request.user, recurrence=rec)
+            .select_related("account", "recurrence")
+            .prefetch_related("tag_links__tag")
+        )
+        page = self.paginate_queryset(qs)
+        ser = TransactionSerializer(
+            page if page is not None else qs, many=True, context={"request": request}
+        )
+        if page is not None:
+            return self.get_paginated_response(ser.data)
+        return Response(ser.data)
+
+    @action(detail=True, methods=["get"])
+    def suggest(self, request, pk=None):
+        from .recurrences import suggest
+
+        rec = self.get_object()
+        txs = suggest(rec)
+        return Response(
+            TransactionSerializer(txs, many=True, context={"request": request}).data
+        )
+
+    @action(detail=True, methods=["post"])
+    def attach(self, request, pk=None):
+        from .recurrences import attach, detach
+
+        rec = self.get_object()
+        ser = RecurrenceAttachSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ids = ser.validated_data["transaction_ids"]
+        do_detach = ser.validated_data.get("detach")
+        txs = list(
+            Transaction.objects.filter(owner=request.user, id__in=ids).prefetch_related(
+                "tag_links"
+            )
+        )
+        rec = Recurrence.objects.prefetch_related("tags").get(pk=rec.pk)
+        changed = 0
+        for tx in txs:
+            if do_detach:
+                detach(tx, rec)
+                changed += 1
+            elif tx.recurrence_id in (None, rec.id):
+                if attach(tx, rec):
+                    changed += 1
+        rec = self.get_queryset().get(pk=rec.pk)
+        self._stats_recs = [rec]
+        return Response(
+            {"updated": changed, "recurrence": self.get_serializer(rec).data}
+        )
+
+
+class TaxProfileView(APIView):
+    """GET/PATCH the current user's autónomo tax settings."""
+
+    def get(self, request):
+        from .tax import get_or_create_profile
+
+        profile = get_or_create_profile(request.user)
+        return Response(TaxProfileSerializer(profile, context={"request": request}).data)
+
+    def patch(self, request):
+        from .tax import get_or_create_profile
+
+        profile = get_or_create_profile(request.user)
+        serializer = TaxProfileSerializer(
+            profile, data=request.data, partial=True, context={"request": request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def put(self, request):
+        return self.patch(request)
+
+
+class TaxEstimateView(APIView):
+    """GET year estimate: current + planned income vs remaining tax."""
+
+    def get(self, request):
+        from .tax import estimate
+
+        raw = request.query_params.get("year")
+        year = None
+        if raw:
+            try:
+                year = int(raw)
+            except ValueError as exc:
+                raise ValidationError({"year": "Use a calendar year."}) from exc
+        return Response(estimate(request.user, year))
+
+
 class RuleViewSet(viewsets.ModelViewSet):
     serializer_class = RuleSerializer
 
@@ -1116,6 +1287,8 @@ BACKUP_MODELS = [
     Tag,
     Budget,
     Rule,
+    Recurrence,
+    TaxProfile,
     Upload,
     Transaction,
     TransactionTag,
@@ -1139,6 +1312,8 @@ class BackupExportView(APIView):
             Tag.objects.filter(owner=user),
             Budget.objects.filter(owner=user),
             Rule.objects.filter(owner=user),
+            Recurrence.objects.filter(owner=user),
+            TaxProfile.objects.filter(owner=user),
             Upload.objects.filter(owner=user),
             Transaction.objects.filter(owner=user),
             TransactionTag.objects.filter(transaction__owner=user),
@@ -1189,6 +1364,8 @@ class BackupImportView(APIView):
                 Folder.objects.filter(owner=user).delete()
                 Rule.objects.filter(owner=user).delete()
                 Transaction.objects.filter(owner=user).delete()
+                Recurrence.objects.filter(owner=user).delete()
+                TaxProfile.objects.filter(owner=user).delete()
                 Upload.objects.filter(owner=user).delete()
                 Budget.objects.filter(owner=user).delete()
                 Tag.objects.filter(owner=user).delete()

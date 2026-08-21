@@ -4,6 +4,7 @@ import SubNav from "../../components/SubNav";
 
 const ITEMS = [
   { label: "All", to: "/transactions" },
+  { label: "Recurring", to: "/transactions/recurring" },
   { label: "Folders", to: "/transactions/folders" },
   { label: "Tags", to: "/transactions/tags" },
   { label: "Rules", to: "/transactions/rules" },

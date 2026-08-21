@@ -11,8 +11,10 @@ from .models import (
     IssuerProfile,
     PurchaseItem,
     Receipt,
+    Recurrence,
     Rule,
     Tag,
+    TaxProfile,
     TelegramLink,
     Transaction,
     TransactionTag,
@@ -139,6 +141,37 @@ class RuleAdmin(admin.ModelAdmin):
     list_filter = ("owner", "is_active")
     search_fields = ("name",)
     filter_horizontal = ("tags",)
+
+
+@admin.register(Recurrence)
+class RecurrenceAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "category",
+        "amount",
+        "frequency",
+        "due_day",
+        "auto_match",
+        "is_active",
+        "owner",
+    )
+    list_filter = ("owner", "category", "frequency", "is_active", "auto_match")
+    search_fields = ("name", "match_text")
+    filter_horizontal = ("tags",)
+
+
+@admin.register(TaxProfile)
+class TaxProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        "owner",
+        "irpf_method",
+        "income_from",
+        "ss_mode",
+        "simplificada",
+        "updated_at",
+    )
+    list_filter = ("irpf_method", "income_from", "ss_mode")
+    filter_horizontal = ("deductible_tags",)
 
 
 @admin.register(Folder)

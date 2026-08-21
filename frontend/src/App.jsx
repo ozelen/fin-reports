@@ -15,7 +15,9 @@ import Login from "./pages/Login";
 import UploadPage from "./pages/Upload";
 import Dashboard from "./pages/Dashboard";
 import Budgets from "./pages/Budgets";
+import Taxes from "./pages/Taxes";
 import Transactions from "./pages/Transactions";
+import Recurring from "./pages/Recurring";
 import Folders from "./pages/Folders";
 import Tags from "./pages/Tags";
 import Rules from "./pages/Rules";
@@ -38,6 +40,7 @@ function RequireAuth({ children }) {
 const TABS = [
   { label: "Dashboard", value: "/dashboard" },
   { label: "Budgets", value: "/budgets" },
+  { label: "Taxes", value: "/taxes" },
   { label: "Transactions", value: "/transactions" },
   { label: "My", value: "/my" },
   { label: "Clients", value: "/clients" },
@@ -105,9 +108,11 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
       <Route path="/budgets" element={<Protected><Budgets /></Protected>} />
+      <Route path="/taxes" element={<Protected><Taxes /></Protected>} />
 
       <Route path="/transactions" element={<Protected><TransactionsLayout /></Protected>}>
         <Route index element={<Transactions />} />
+        <Route path="recurring" element={<Recurring />} />
         <Route path="folders" element={<Folders />} />
         <Route path="tags" element={<Tags />} />
         <Route path="rules" element={<Rules />} />

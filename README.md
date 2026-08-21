@@ -31,6 +31,8 @@ served together via **Docker Compose**.
   (tax declarations, certificates), with upload/download and filters.
 - JWT authentication. A single superuser is seeded from environment variables.
 - Telegram finance agent: chat about transactions, drop receipt/invoice photos or PDFs. Files are stored as receipts and attached to a bank transaction when one matches (or later, on statement import).
+- Recurring payments: name a series (subscription, loan, tax, income), create it by hand or from an existing transaction, attach historical rows, and auto-match new statement rows by amount + cadence + merchant.
+- Autónomo tax estimate (Spain): IRPF modelo 130 + RETA cuota from issued invoices, deductible tags, and remaining recurrences. Estimator only — not tax advice; uses 2026 estatal scale and minimum RETA cuota. Regional IRPF and IVA are out of scope.
 
 ### The shared "criteria" concept
 
@@ -108,9 +110,15 @@ bot (Telegram long-poll)  ──▶  db + media, Gemini, api.telegram.org
 | POST | `/api/auth/token/` | Obtain JWT (username/password) |
 | POST | `/api/auth/token/refresh/` | Refresh access token |
 | POST | `/api/uploads/` | Upload + parse a statement (multipart `file`) |
-| GET | `/api/transactions/` | List; filters: `kind`, `keyword`/`search`, `counterparty`, `date_from`, `date_to`, `quarter`, `year`, `tags`, `tag_match`, `source`, `untagged`, `folder` |
+| GET | `/api/transactions/` | List; filters: `kind`, `keyword`/`search`, `counterparty`, `date_from`, `date_to`, `quarter`, `year`, `tags`, `tag_match`, `source`, `untagged`, `folder`, `recurrence` |
 | GET | `/api/transactions/summary/` | Totals for the current filter |
 | POST | `/api/transactions/tag/` | Bulk add/remove tags: `{ "transaction_ids": [...], "add": [...], "remove": [...] }` |
+| GET | `/api/recurrences/forecast/` | EUR remaining this month (from today) and next month |
+| POST | `/api/recurrences/from_transaction/` | Create from a bank row and backfill historical matches |
+| GET | `/api/recurrences/{id}/suggest/` | Unmatched txs that fit this series |
+| POST | `/api/recurrences/{id}/attach/` | Attach or detach `{ "transaction_ids": [...], "detach": false }` |
+| GET | `/api/tax/estimate/?year=2026` | Autónomo estimate: current + planned income vs remaining tax |
+| GET/PATCH | `/api/tax/profile/` | Tax settings (deductible tags, cuota mode, forecast override) |
 | GET/POST | `/api/tags/` | List / create tags |
 | GET/POST | `/api/rules/` | List / create rules |
 | GET | `/api/rules/{id}/preview/` | Dry-run: match count + sample |

@@ -33,6 +33,7 @@ class TransactionFilter(filters.FilterSet):
     source = filters.CharFilter(method="filter_source")
     untagged = filters.BooleanFilter(method="filter_untagged")
     folder = filters.NumberFilter(method="filter_folder")
+    recurrence = filters.NumberFilter(field_name="recurrence__id")
     upload = filters.NumberFilter(field_name="upload__id")
     account = filters.NumberFilter(field_name="account__id")
     min_amount = filters.NumberFilter(field_name="amount", lookup_expr="gte")
@@ -40,7 +41,15 @@ class TransactionFilter(filters.FilterSet):
 
     class Meta:
         model = Transaction
-        fields = ["kind", "date_from", "date_to", "folder", "upload", "account"]
+        fields = [
+            "kind",
+            "date_from",
+            "date_to",
+            "folder",
+            "recurrence",
+            "upload",
+            "account",
+        ]
 
     def filter_noop(self, queryset, name, value):
         return queryset

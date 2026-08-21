@@ -11,6 +11,7 @@ import {
   DialogTitle,
   Divider,
   FormControlLabel,
+  IconButton,
   MenuItem,
   Paper,
   Stack,
@@ -23,11 +24,13 @@ import {
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import LocalOfferIcon from "@mui/icons-material/LocalOffer";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import RepeatIcon from "@mui/icons-material/Repeat";
 import { DataGrid } from "@mui/x-data-grid";
 import api from "../api";
 import TagMultiSelect from "../components/TagMultiSelect";
 import { TagCell, TagEditorPopover } from "../components/TagCell";
 import ReceiptDialog from "../components/ReceiptDialog";
+import RecurrenceDialog from "../components/RecurrenceDialog";
 
 const currency = (v, code) =>
   new Intl.NumberFormat("es-ES", {
@@ -72,6 +75,9 @@ export default function Transactions() {
   const [accountFilter, setAccountFilter] = useState(
     () => searchParams.get("account") || "",
   );
+  const [recurrenceFilter, setRecurrenceFilter] = useState(
+    () => searchParams.get("recurrence") || "",
+  );
 
   const [tags, setTags] = useState([]);
   const [accounts, setAccounts] = useState([]);
@@ -102,6 +108,14 @@ export default function Transactions() {
 
   const [tagEditor, setTagEditor] = useState(null);
   const [receiptId, setReceiptId] = useState(null);
+  const [recurDialog, setRecurDialog] = useState(false);
+  const [recurForm, setRecurForm] = useState({
+    name: "",
+    frequency: "month",
+    category: "other",
+  });
+  const [editingRec, setEditingRec] = useState(null);
+  const [recurEditOpen, setRecurEditOpen] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 400);
@@ -143,6 +157,7 @@ export default function Transactions() {
     if (source) p.source = source;
     if (untagged) p.untagged = "true";
     if (accountFilter) p.account = accountFilter;
+    if (recurrenceFilter) p.recurrence = recurrenceFilter;
     if (sortModel.length) {
       p.ordering = sortModel
         .map((s) => (s.sort === "desc" ? "-" : "") + s.field)
@@ -162,6 +177,7 @@ export default function Transactions() {
     source,
     untagged,
     accountFilter,
+    recurrenceFilter,
     sortModel,
   ]);
 
@@ -199,6 +215,7 @@ export default function Transactions() {
     source,
     untagged,
     accountFilter,
+    recurrenceFilter,
   ]);
 
   const setRowTags = (txId, updater) =>
@@ -233,8 +250,36 @@ export default function Transactions() {
     if (!existing) loadTags();
   };
 
+  const openRecurrence = async (id) => {
+    const { data } = await api.get(`/recurrences/${id}/`);
+    setEditingRec(data);
+    setRecurEditOpen(true);
+  };
+
   const columns = [
-    { field: "operation_date", headerName: "Date", width: 110 },
+    {
+      field: "operation_date",
+      headerName: "Date",
+      width: 148,
+      renderCell: (p) => (
+        <Stack direction="row" alignItems="center" spacing={0.25} sx={{ overflow: "hidden" }}>
+          <span>{p.value}</span>
+          {p.row.recurrence && (
+            <IconButton
+              size="small"
+              title={p.row.recurrence_name || "Edit recurrence"}
+              onClick={(e) => {
+                e.stopPropagation();
+                openRecurrence(p.row.recurrence);
+              }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <RepeatIcon fontSize="small" color="primary" />
+            </IconButton>
+          )}
+        </Stack>
+      ),
+    },
     {
       field: "concept",
       headerName: "Concept",
@@ -458,6 +503,7 @@ export default function Transactions() {
               <MenuItem value="manual">Manual</MenuItem>
               <MenuItem value="rule">Rule</MenuItem>
               <MenuItem value="ai">AI</MenuItem>
+              <MenuItem value="schedule">Schedule</MenuItem>
             </TextField>
             <FormControlLabel
               control={<Switch checked={untagged} onChange={(e) => setUntagged(e.target.checked)} />}
@@ -477,6 +523,21 @@ export default function Transactions() {
             </Button>
             <Button startIcon={<CreateNewFolderIcon />} disabled={!selection.length} onClick={openFolderDialog}>
               Add to folder
+            </Button>
+            <Button
+              startIcon={<RepeatIcon />}
+              disabled={selection.length !== 1}
+              onClick={() => {
+                const row = rows.find((r) => r.id === selection[0]);
+                setRecurForm({
+                  name: (row?.counterparty || row?.concept || "Recurring").slice(0, 120),
+                  frequency: "month",
+                  category: "other",
+                });
+                setRecurDialog(true);
+              }}
+            >
+              Make recurring
             </Button>
             <Button variant="contained" startIcon={<AutoAwesomeIcon />} onClick={runAi}>
               {selection.length ? `AI classify (${selection.length})` : "AI classify untagged"}
@@ -638,6 +699,74 @@ export default function Transactions() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Dialog open={recurDialog} onClose={() => setRecurDialog(false)} fullWidth maxWidth="xs">
+        <DialogTitle>Make recurring</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              label="Name"
+              value={recurForm.name}
+              onChange={(e) => setRecurForm({ ...recurForm, name: e.target.value })}
+              fullWidth
+            />
+            <TextField
+              select
+              label="Frequency"
+              value={recurForm.frequency}
+              onChange={(e) => setRecurForm({ ...recurForm, frequency: e.target.value })}
+            >
+              <MenuItem value="week">Weekly</MenuItem>
+              <MenuItem value="month">Monthly</MenuItem>
+              <MenuItem value="quarter">Quarterly</MenuItem>
+              <MenuItem value="year">Yearly</MenuItem>
+            </TextField>
+            <TextField
+              select
+              label="Category"
+              value={recurForm.category}
+              onChange={(e) => setRecurForm({ ...recurForm, category: e.target.value })}
+            >
+              <MenuItem value="subscription">Subscription</MenuItem>
+              <MenuItem value="loan">Loan</MenuItem>
+              <MenuItem value="tax">Tax</MenuItem>
+              <MenuItem value="income">Income</MenuItem>
+              <MenuItem value="other">Other</MenuItem>
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRecurDialog(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={!recurForm.name.trim() || selection.length !== 1}
+            onClick={async () => {
+              const { data } = await api.post("/recurrences/from_transaction/", {
+                transaction_id: selection[0],
+                name: recurForm.name,
+                frequency: recurForm.frequency,
+                category: recurForm.category,
+              });
+              setRecurDialog(false);
+              setSelection([]);
+              setEditingRec(data);
+              setRecurEditOpen(true);
+              load();
+            }}
+          >
+            Create
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <RecurrenceDialog
+        open={recurEditOpen}
+        recurrence={editingRec}
+        tags={tags}
+        accounts={accounts}
+        onClose={() => setRecurEditOpen(false)}
+        onSaved={() => load()}
+      />
     </Box>
   );
 }

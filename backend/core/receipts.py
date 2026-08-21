@@ -314,6 +314,11 @@ def ingest_statement(user, upload, account, result: dict) -> dict:
     )
     from .accounts import apply_statement_balance
 
+    from .recurrences import attach_new_recurrences
+
+    recurrences_attached = attach_new_recurrences(
+        user, Transaction.objects.filter(upload=upload)
+    )
     apply_statement_balance(account, rows)
     return {
         "imported": upload.imported_count,
@@ -321,6 +326,7 @@ def ingest_statement(user, upload, account, result: dict) -> dict:
         "rule_assignments": rule_result["assignments_created"],
         "receipts_attached": receipts_attached,
         "receipts_enriched": receipts_enriched,
+        "recurrences_attached": recurrences_attached,
     }
 
 

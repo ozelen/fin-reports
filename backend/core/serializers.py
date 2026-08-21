@@ -12,8 +12,10 @@ from .models import (
     IssuerProfile,
     PurchaseItem,
     Receipt,
+    Recurrence,
     Rule,
     Tag,
+    TaxProfile,
     Transaction,
     TransactionTag,
     Upload,
@@ -336,6 +338,163 @@ class BudgetSerializer(serializers.ModelSerializer):
         ]
 
 
+class RecurrenceSerializer(serializers.ModelSerializer):
+    account = OwnerScopedPKField(model=Account, required=False, allow_null=True)
+    tags = OwnerScopedPKField(model=Tag, many=True, required=False)
+    account_label = serializers.CharField(
+        source="account.name", read_only=True, default=None
+    )
+    next_due = serializers.SerializerMethodField()
+    last_date = serializers.SerializerMethodField()
+    occurrence_count = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    next_month_count = serializers.SerializerMethodField()
+    next_month_remaining = serializers.SerializerMethodField()
+    next_month_remaining_eur = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Recurrence
+        fields = [
+            "id",
+            "name",
+            "amount",
+            "currency",
+            "frequency",
+            "due_day",
+            "start_date",
+            "end_date",
+            "account",
+            "account_label",
+            "match_text",
+            "amount_tolerance_pct",
+            "auto_match",
+            "category",
+            "is_active",
+            "tags",
+            "next_due",
+            "last_date",
+            "occurrence_count",
+            "status",
+            "next_month_count",
+            "next_month_remaining",
+            "next_month_remaining_eur",
+            "created_at",
+        ]
+        read_only_fields = [
+            "id",
+            "account_label",
+            "next_due",
+            "last_date",
+            "occurrence_count",
+            "status",
+            "next_month_count",
+            "next_month_remaining",
+            "next_month_remaining_eur",
+            "created_at",
+        ]
+
+    def validate(self, attrs):
+        freq = attrs.get("frequency") or getattr(
+            self.instance, "frequency", Recurrence.FREQ_MONTH
+        )
+        due = attrs.get("due_day")
+        if due is None:
+            due = getattr(self.instance, "due_day", 1)
+        due = int(due)
+        if freq == Recurrence.FREQ_WEEK:
+            if not 0 <= due <= 6:
+                raise serializers.ValidationError(
+                    {"due_day": "Weekday must be 0–6 (Mon–Sun)."}
+                )
+        elif not 1 <= due <= 31:
+            raise serializers.ValidationError({"due_day": "Day of month must be 1–31."})
+        return attrs
+
+    def _stat(self, obj, key):
+        stats = (self.context or {}).get("stats") or {}
+        row = stats.get(obj.id)
+        if row is not None:
+            return row.get(key)
+        from .recurrences import last_paid, next_unpaid, status_for
+
+        live = {
+            "occurrence_count": obj.occurrences.count(),
+            "last_date": last_paid(obj),
+            "next_due": next_unpaid(obj),
+            "status": status_for(obj),
+        }
+        return live.get(key)
+
+    def get_next_due(self, obj):
+        value = self._stat(obj, "next_due")
+        return value.isoformat() if hasattr(value, "isoformat") else value
+
+    def get_last_date(self, obj):
+        value = self._stat(obj, "last_date")
+        return value.isoformat() if hasattr(value, "isoformat") else value
+
+    def get_occurrence_count(self, obj):
+        return self._stat(obj, "occurrence_count") or 0
+
+    def get_status(self, obj):
+        return self._stat(obj, "status")
+
+    def get_next_month_count(self, obj):
+        return self._stat(obj, "next_month_count") or 0
+
+    def get_next_month_remaining(self, obj):
+        value = self._stat(obj, "next_month_remaining")
+        return 0 if value is None else value
+
+    def get_next_month_remaining_eur(self, obj):
+        return self._stat(obj, "next_month_remaining_eur")
+
+
+class FromTransactionSerializer(serializers.Serializer):
+    transaction_id = serializers.IntegerField()
+    name = serializers.CharField(required=False, allow_blank=True, max_length=120)
+    frequency = serializers.ChoiceField(
+        choices=Recurrence.FREQ_CHOICES, required=False
+    )
+    category = serializers.ChoiceField(
+        choices=Recurrence.CAT_CHOICES, required=False
+    )
+    due_day = serializers.IntegerField(required=False)
+    amount_tolerance_pct = serializers.DecimalField(
+        max_digits=5, decimal_places=2, required=False
+    )
+    auto_match = serializers.BooleanField(required=False)
+    tags = serializers.ListField(
+        child=serializers.IntegerField(), required=False
+    )
+
+
+class RecurrenceAttachSerializer(serializers.Serializer):
+    transaction_ids = serializers.ListField(child=serializers.IntegerField())
+    detach = serializers.BooleanField(required=False, default=False)
+
+
+class TaxProfileSerializer(serializers.ModelSerializer):
+    deductible_tags = OwnerScopedPKField(model=Tag, many=True, required=False)
+
+    class Meta:
+        model = TaxProfile
+        fields = [
+            "id",
+            "irpf_method",
+            "withholding_rate",
+            "simplificada",
+            "income_from",
+            "ss_mode",
+            "ss_cuota_override",
+            "new_autonomo_start",
+            "planned_income_override",
+            "deductible_tags",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "updated_at"]
+
+
 class TransactionTagSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(source="tag.id", read_only=True)
     name = serializers.CharField(source="tag.name", read_only=True)
@@ -351,8 +510,12 @@ class TransactionSerializer(serializers.ModelSerializer):
     pending = serializers.BooleanField(read_only=True)
     tags = TransactionTagSerializer(source="tag_links", many=True, read_only=True)
     account_label = serializers.CharField(source="account.name", read_only=True)
-    receipt_id = serializers.IntegerField(read_only=True, allow_null=True)
-    item_count = serializers.IntegerField(read_only=True)
+    receipt_id = serializers.SerializerMethodField()
+    item_count = serializers.SerializerMethodField()
+    recurrence = serializers.IntegerField(
+        source="recurrence_id", read_only=True, allow_null=True
+    )
+    recurrence_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
@@ -374,9 +537,21 @@ class TransactionSerializer(serializers.ModelSerializer):
             "account_label",
             "receipt_id",
             "item_count",
+            "recurrence",
+            "recurrence_name",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_receipt_id(self, obj):
+        return getattr(obj, "receipt_id", None)
+
+    def get_item_count(self, obj):
+        return getattr(obj, "item_count", 0) or 0
+
+    def get_recurrence_name(self, obj):
+        rec = getattr(obj, "recurrence", None)
+        return rec.name if rec else None
 
 
 class RuleSerializer(serializers.ModelSerializer):
