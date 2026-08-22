@@ -10,6 +10,7 @@ import {
   DialogTitle,
   FormControlLabel,
   IconButton,
+  Menu,
   MenuItem,
   Paper,
   Stack,
@@ -37,7 +38,6 @@ const PERIODS = [
   { value: "quarter", label: "Quarterly" },
   { value: "year", label: "Yearly" },
 ];
-const BUDGET_PERIODS = PERIODS.filter((p) => p.value !== "quarter");
 const SCOPES = [
   { value: "month", label: "Month" },
   { value: "quarter", label: "Quarter" },
@@ -103,6 +103,7 @@ export default function Budgets() {
   const [form, setForm] = useState(BLANK);
   const [recOpen, setRecOpen] = useState(false);
   const [editingRec, setEditingRec] = useState(null);
+  const [planMenu, setPlanMenu] = useState(null);
   const [chartSalary, setChartSalary] = useState(true);
   const [chartTax, setChartTax] = useState(true);
   const [chartRecurring, setChartRecurring] = useState(true);
@@ -143,6 +144,19 @@ export default function Budgets() {
       amount: Number(row.suggest_amount ?? row.actual ?? 0).toFixed(2),
     });
     setOpen(true);
+  };
+
+  const openPlanRecurrence = (row) => {
+    const amt = Number(row.actual || row.suggest_amount || 0);
+    setEditingRec({
+      name: row.tag_name || row.name,
+      amount: -Math.abs(amt),
+      tags: row.tag ? [row.tag] : [],
+      category: "other",
+      frequency: "month",
+      start_date: row.period_start,
+    });
+    setRecOpen(true);
   };
 
   const openEdit = async (row) => {
@@ -337,7 +351,11 @@ export default function Budgets() {
               <Button size="small" component={RouterLink} to={`/transactions?${params}`}>
                 View
               </Button>
-              <IconButton size="small" color="primary" onClick={() => openPlan(p.row)}>
+              <IconButton
+                size="small"
+                color="primary"
+                onClick={(e) => setPlanMenu({ anchor: e.currentTarget, row: p.row })}
+              >
                 <AddIcon fontSize="small" />
               </IconButton>
             </Stack>
@@ -585,7 +603,7 @@ export default function Budgets() {
               onChange={(e) => setForm({ ...form, period: e.target.value })}
               fullWidth
             >
-              {BUDGET_PERIODS.map((p) => (
+              {PERIODS.map((p) => (
                 <MenuItem key={p.value} value={p.value}>
                   {p.label}
                 </MenuItem>
@@ -647,6 +665,29 @@ export default function Budgets() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Menu
+        anchorEl={planMenu?.anchor}
+        open={Boolean(planMenu)}
+        onClose={() => setPlanMenu(null)}
+      >
+        <MenuItem
+          onClick={() => {
+            openPlan(planMenu.row);
+            setPlanMenu(null);
+          }}
+        >
+          Budget
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            openPlanRecurrence(planMenu.row);
+            setPlanMenu(null);
+          }}
+        >
+          Recurrence
+        </MenuItem>
+      </Menu>
 
       <RecurrenceDialog
         open={recOpen}

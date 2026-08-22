@@ -4,10 +4,12 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+from django.db.models import Q
+
 from .criteria import cadence_factor, period_range
 from .fx import Converter, exclude_ignored, summarize_eur
 from .models import Account, Budget, Recurrence, Tag, Transaction
-from .recurrences import iter_occurrences, remaining_dates
+from .recurrences import remaining_dates
 
 _ZERO = Decimal("0")
 _TOP_UNPLANNED = 8
@@ -142,6 +144,15 @@ def _is_irpf_rec(rec) -> bool:
     )
 
 
+def rec_planned(rec, start: dt.date, end: dt.date) -> Decimal:
+    """Cadence share of |amount| in [start, end], 0 if the rec hasn't started."""
+    if rec.start_date and rec.start_date > end:
+        return _ZERO
+    if rec.end_date and rec.end_date < start:
+        return _ZERO
+    return abs(rec.amount) * cadence_factor(rec.frequency, start, end)
+
+
 def irpf_monthly_in_window(recs, start: dt.date, end: dt.date) -> Decimal:
     """Unpaid 130 ÷ 3 for each overlapping earn month in [start, end]."""
     total = _ZERO
@@ -224,8 +235,7 @@ def status(user, start: dt.date | None = None, end: dt.date | None = None) -> di
     for rec in recs:
         if _is_irpf_rec(rec):
             continue
-        n = sum(1 for _ in iter_occurrences(rec, start, end))
-        native = abs(rec.amount) * n
+        native = rec_planned(rec, start, end)
         planned = rec_conv.to_eur(native, rec.currency or "EUR", as_of)
         if planned is None:
             planned = native if (rec.currency or "EUR").upper() == "EUR" else _ZERO
@@ -243,18 +253,22 @@ def status(user, start: dt.date | None = None, end: dt.date | None = None) -> di
             group = "salary"
         else:
             group = "recurring"
+        tags = list(rec.tags.all())
+        tag = tags[0] if tags else None
         qs = Transaction.objects.filter(
             owner=user,
-            recurrence=rec,
             operation_date__gte=start,
             operation_date__lte=end,
         )
         if rec.account_id:
             qs = qs.filter(account=rec.account)
+        if tag:
+            qs = qs.filter(Q(recurrence=rec) | Q(tags=tag))
+        else:
+            qs = qs.filter(recurrence=rec)
+        qs = exclude_ignored(qs)
         summary = summarize_eur(qs)
         actual = _actual(summary, kind)
-        tags = list(rec.tags.all())
-        tag = tags[0] if tags else None
         line = _line(
             row_id=f"r-{rec.id}",
             source="recurrence",

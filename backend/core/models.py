@@ -151,10 +151,12 @@ class Tag(models.Model):
 class Budget(models.Model):
     PERIOD_WEEK = "week"
     PERIOD_MONTH = "month"
+    PERIOD_QUARTER = "quarter"
     PERIOD_YEAR = "year"
     PERIOD_CHOICES = [
         (PERIOD_WEEK, "Week"),
         (PERIOD_MONTH, "Month"),
+        (PERIOD_QUARTER, "Quarter"),
         (PERIOD_YEAR, "Year"),
     ]
     KIND_SPEND = "spend"

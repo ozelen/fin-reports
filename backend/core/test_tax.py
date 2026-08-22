@@ -4,7 +4,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest import TestCase
 
-from core.budgets import irpf_monthly_in_window
+from core.budgets import irpf_monthly_in_window, rec_planned
 from core.invoicing import working_days_in_month
 from core.tax import (
     classify_payment,
@@ -189,4 +189,17 @@ class IrpfMonthlyBudgetTests(TestCase):
         ]
         got = irpf_monthly_in_window(recs, date(2026, 1, 1), date(2026, 12, 31))
         self.assertEqual(got, Decimal("2988.26") * 2)
+
+
+class RecPlannedTests(TestCase):
+    def test_quarterly_in_august_is_a_month_share(self):
+        rec = SimpleNamespace(
+            amount=Decimal("-300"),
+            frequency="quarter",
+            start_date=date(2026, 8, 22),
+            end_date=None,
+        )
+        got = rec_planned(rec, date(2026, 8, 1), date(2026, 8, 31))
+        self.assertGreater(got, 0)
+        self.assertLess(got, Decimal("300"))
 
