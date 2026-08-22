@@ -3,6 +3,7 @@ and rules. A criteria dict is a subset of the transaction filter params."""
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
 
 def _quarter_bounds(year: int, q: int) -> tuple[dt.date, dt.date]:
@@ -49,6 +50,8 @@ def period_range(period, today: dt.date | None = None):
         return start, start + dt.timedelta(days=6)
     if period == "year":
         return dt.date(today.year, 1, 1), dt.date(today.year, 12, 31)
+    if period == "quarter":
+        return _quarter_bounds(today.year, (today.month - 1) // 3 + 1)
     if period == "month":
         start = today.replace(day=1)
         if start.month == 12:
@@ -57,6 +60,50 @@ def period_range(period, today: dt.date | None = None):
             end = dt.date(start.year, start.month + 1, 1) - dt.timedelta(days=1)
         return start, end
     return None
+
+
+def view_window(*, year=None, month=None, quarter=None, today: dt.date | None = None):
+    """Calendar month, quarter, or year. Month wins over quarter; year is the rest."""
+    today = today or dt.date.today()
+    y = int(year) if year not in (None, "") else today.year
+    if month not in (None, ""):
+        m = int(month)
+        start = dt.date(y, m, 1)
+        if m == 12:
+            return start, dt.date(y, 12, 31)
+        return start, dt.date(y, m + 1, 1) - dt.timedelta(days=1)
+    if quarter not in (None, ""):
+        token = str(quarter).strip().lower().lstrip("q")
+        return _quarter_bounds(y, int(token))
+    return dt.date(y, 1, 1), dt.date(y, 12, 31)
+
+
+def cadence_factor(cadence, start: dt.date, end: dt.date):
+    """How many cadence units (or a fraction) fit in [start, end]."""
+    unit = period_range(cadence, start)
+    if not unit:
+        return Decimal("1")
+    unit_days = (unit[1] - unit[0]).days + 1
+    view_days = (end - start).days + 1
+    if view_days < unit_days:
+        return Decimal(view_days) / Decimal(unit_days)
+    if cadence == "week":
+        day = start - dt.timedelta(days=start.weekday())
+        n = 0
+        while day <= end:
+            if day + dt.timedelta(days=6) >= start:
+                n += 1
+            day += dt.timedelta(days=7)
+        return Decimal(n)
+    if cadence == "month":
+        return Decimal((end.year - start.year) * 12 + end.month - start.month + 1)
+    if cadence == "quarter":
+        first = start.year * 4 + (start.month - 1) // 3
+        last = end.year * 4 + (end.month - 1) // 3
+        return Decimal(last - first + 1)
+    if cadence == "year":
+        return Decimal(end.year - start.year + 1)
+    return Decimal("1")
 
 
 def apply_criteria(queryset, criteria: dict | None):

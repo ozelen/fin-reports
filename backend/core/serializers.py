@@ -498,6 +498,9 @@ class TaxProfileSerializer(serializers.ModelSerializer):
             "withholding_rate",
             "simplificada",
             "income_from",
+            "hourly_rate",
+            "hours_per_day",
+            "hours_overrides",
             "ss_mode",
             "ss_cuota_override",
             "new_autonomo_start",
@@ -506,6 +509,27 @@ class TaxProfileSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "updated_at"]
+
+    def validate_hours_overrides(self, value):
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Must be an object of YYYY-MM → hours.")
+        clean = {}
+        for key, hours in value.items():
+            token = str(key).strip()
+            if len(token) != 7 or token[4] != "-":
+                raise serializers.ValidationError(f"Bad month key {key!r}.")
+            try:
+                year, month = int(token[:4]), int(token[5:])
+            except ValueError as exc:
+                raise serializers.ValidationError(f"Bad month key {key!r}.") from exc
+            if month < 1 or month > 12:
+                raise serializers.ValidationError(f"Bad month key {key!r}.")
+            if hours in (None, ""):
+                continue
+            clean[f"{year:04d}-{month:02d}"] = float(hours)
+        return clean
 
 
 class TransactionTagSerializer(serializers.ModelSerializer):

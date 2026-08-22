@@ -167,6 +167,7 @@ class TaxProfileAdmin(admin.ModelAdmin):
         "owner",
         "irpf_method",
         "income_from",
+        "hourly_rate",
         "ss_mode",
         "simplificada",
         "updated_at",

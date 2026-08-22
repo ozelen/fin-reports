@@ -279,9 +279,11 @@ class Recurrence(models.Model):
 class TaxProfile(models.Model):
     METHOD_130 = "modelo_130"
     METHOD_CHOICES = [(METHOD_130, "Modelo 130")]
+    INCOME_HOURS = "hours"
     INCOME_INVOICES = "invoices"
     INCOME_TAGS = "tags"
     INCOME_CHOICES = [
+        (INCOME_HOURS, "Hourly × working days"),
         (INCOME_INVOICES, "Issued invoices"),
         (INCOME_TAGS, "Tagged bank income"),
     ]
@@ -305,8 +307,12 @@ class TaxProfile(models.Model):
     )
     simplificada = models.BooleanField(default=True)
     income_from = models.CharField(
-        max_length=12, choices=INCOME_CHOICES, default=INCOME_INVOICES
+        max_length=12, choices=INCOME_CHOICES, default=INCOME_HOURS
     )
+    hourly_rate = models.DecimalField(max_digits=12, decimal_places=2, default=30)
+    hours_per_day = models.PositiveSmallIntegerField(default=8)
+    # {"2026-08": 160} — hours for that calendar month; missing keys use invoice or Mon–Fri.
+    hours_overrides = models.JSONField(default=dict, blank=True)
     ss_mode = models.CharField(max_length=8, choices=SS_CHOICES, default=SS_TABLE)
     ss_cuota_override = models.DecimalField(
         max_digits=14, decimal_places=2, null=True, blank=True

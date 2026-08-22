@@ -836,16 +836,23 @@ class BudgetViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def status(self, request):
-        raw = request.query_params.get("as_of")
-        as_of = None
-        if raw:
-            try:
-                as_of = dt.date.fromisoformat(raw)
-            except ValueError as exc:
-                raise ValidationError({"as_of": "Use YYYY-MM-DD."}) from exc
         from .budgets import status as budget_status
+        from .criteria import view_window
+        from .tax import estimate
 
-        return Response(budget_status(request.user, as_of))
+        estimate(request.user)
+
+        try:
+            start, end = view_window(
+                year=request.query_params.get("year"),
+                month=request.query_params.get("month"),
+                quarter=request.query_params.get("quarter"),
+            )
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValidationError(
+                {"detail": "year, month, and quarter must be numbers."}
+            ) from exc
+        return Response(budget_status(request.user, start, end))
 
 
 class RecurrenceViewSet(viewsets.ModelViewSet):
@@ -866,6 +873,9 @@ class RecurrenceViewSet(viewsets.ModelViewSet):
         return ctx
 
     def list(self, request, *args, **kwargs):
+        from .tax import estimate
+
+        estimate(request.user)
         qs = self.filter_queryset(self.get_queryset())
         page = self.paginate_queryset(qs)
         recs = list(page if page is not None else qs)

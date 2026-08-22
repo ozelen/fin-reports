@@ -1,11 +1,14 @@
 """Spain autónomo tax estimator (IRPF modelo 130 + RETA cuota). Not AEAT filing."""
 from __future__ import annotations
 
+import calendar
 import datetime as dt
+import re
 from decimal import Decimal, ROUND_HALF_UP
 
-from django.db.models import Sum
+from django.db.models import Q, Sum
 
+from .invoicing import working_days_in_month
 from .models import Invoice, Recurrence, TaxProfile, Transaction
 from .recurrences import remaining_dates
 
@@ -49,6 +52,29 @@ RETA_MIN_CUOTA = {
         (None, Decimal("607.35")),
     ],
 }
+
+_CUOTA_RE = re.compile(r"r\.?\s*e\.?\s*autonomos|tgss|cotizacion\s*005", re.I)
+_IRPF_RE = re.compile(r"irpf|pago\s*fraccionado|modelo\s*130", re.I)
+_BIZUM_AEAT_RE = re.compile(r"bizum\s+agencia\s+tributaria", re.I)
+_REFUND_RE = re.compile(r"devoluciones\s+tributarias", re.I)
+_IVA_RE = re.compile(r"\biva\b", re.I)
+_IRPF_YEAR_RE = re.compile(
+    r"2\.0(\d{2})\s*irpf|i\.?\s*r\.?\s*p\.?\s*f\.?\s*(\d{2})\b", re.I
+)
+_PERIOD_RE = re.compile(r"(\d{2})/(\d{4})")
+_TAX_TX_Q = (
+    Q(concept__icontains="tgss")
+    | Q(concept__icontains="autonomos")
+    | Q(concept__icontains="irpf")
+    | Q(concept__icontains="tributaria")
+    | Q(concept__icontains="fraccionado")
+    | Q(concept__icontains="aeat")
+    | Q(counterparty__icontains="tgss")
+    | Q(counterparty__icontains="autonomos")
+    | Q(counterparty__icontains="irpf")
+    | Q(counterparty__icontains="tributaria")
+    | Q(counterparty__icontains="aeat")
+)
 
 
 def _money(value) -> float | None:
@@ -100,6 +126,70 @@ def get_or_create_profile(user) -> TaxProfile:
     return profile
 
 
+def parse_irpf_year(text: str, fallback: int) -> int:
+    match = _IRPF_YEAR_RE.search(text or "")
+    if not match:
+        return fallback
+    yy = match.group(1) or match.group(2)
+    return 2000 + int(yy)
+
+
+def parse_cuota_period(text: str, fallback: dt.date) -> tuple[int, int]:
+    match = _PERIOD_RE.search(text or "")
+    if not match:
+        return fallback.year, fallback.month
+    return int(match.group(2)), int(match.group(1))
+
+
+def classify_payment(concept, counterparty, amount, operation_date) -> dict | None:
+    """Label a bank row as RETA cuota, modelo 130, or IRPF refund. Else None."""
+    blob = f"{concept or ''} {counterparty or ''}"
+    amount = _d(amount)
+    if amount == 0:
+        return None
+    if _CUOTA_RE.search(blob):
+        year, month = parse_cuota_period(blob, operation_date)
+        return {
+            "kind": "cuota",
+            "tax_year": year,
+            "period_month": month,
+            "amount": abs(amount),
+        }
+    if _REFUND_RE.search(blob):
+        if _IVA_RE.search(blob) and not _IRPF_RE.search(blob):
+            return None
+        if not (_IRPF_RE.search(blob) or re.search(r"mod\s*:?\s*100", blob, re.I)):
+            return None
+        return {
+            "kind": "irpf_refund",
+            "tax_year": parse_irpf_year(blob, operation_date.year - 1),
+            "period_month": None,
+            "amount": abs(amount),
+        }
+    if _IRPF_RE.search(blob) or _BIZUM_AEAT_RE.search(blob):
+        if amount > 0:
+            return None
+        return {
+            "kind": "irpf",
+            "tax_year": parse_irpf_year(blob, operation_date.year),
+            "period_month": None,
+            "amount": abs(amount),
+        }
+    return None
+
+
+def dedupe_payments(rows: list[dict]) -> list[dict]:
+    seen = set()
+    out = []
+    for row in rows:
+        key = (row["date"], row["kind"], row["amount"], row.get("tax_year"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
 def _issued_income(user, start: dt.date, end: dt.date) -> Decimal:
     row = Invoice.objects.filter(
         owner=user,
@@ -120,12 +210,17 @@ def _draft_income(user, year: int) -> Decimal:
 
 
 def _tagged_income(user, start: dt.date, end: dt.date) -> Decimal:
-    row = Transaction.objects.filter(
-        owner=user,
-        amount__gte=0,
-        operation_date__gte=start,
-        operation_date__lte=end,
-    ).exclude(metadata__has_key="transfer").aggregate(s=Sum("amount"))
+    row = (
+        Transaction.objects.filter(
+            owner=user,
+            amount__gte=0,
+            operation_date__gte=start,
+            operation_date__lte=end,
+        )
+        .exclude(metadata__has_key="transfer")
+        .exclude(_TAX_TX_Q)
+        .aggregate(s=Sum("amount"))
+    )
     return _d(row["s"])
 
 
@@ -170,6 +265,220 @@ def _months_left(today: dt.date, year: int) -> int:
     return 12 - today.month + 1
 
 
+_QUARTER_MONTHS = ((1, 1, 3), (2, 4, 6), (3, 7, 9), (4, 10, 12))
+
+
+def m130_due(year: int, quarter: int) -> dt.date:
+    if quarter == 4:
+        return dt.date(year + 1, 1, 20)
+    return dt.date(year, {1: 4, 2: 7, 3: 10}[quarter], 20)
+
+
+def _deductible_recurrences(recs, tag_ids: set[int]) -> list:
+    if not tag_ids:
+        return []
+    return [
+        rec
+        for rec in recs
+        if rec.category != Recurrence.CAT_TAX
+        and rec.amount < 0
+        and tag_ids & {t.id for t in rec.tags.all()}
+    ]
+
+
+def _quarter_gastos(user, profile, year, start_m, end_m, today, deduct_recs) -> Decimal:
+    start = dt.date(year, start_m, 1)
+    last = calendar.monthrange(year, end_m)[1]
+    end = dt.date(year, end_m, last)
+    as_of = min(today, end) if today.year == year else (end if today.year > year else start)
+    actual = _deductible_expenses(user, profile, start, as_of)
+    planned = _ZERO
+    if as_of < end:
+        planned = _recurrence_remaining(deduct_recs, as_of, end)
+    return actual + planned
+
+
+def modelo_130_quarters(
+    *,
+    year: int,
+    months: list[dict],
+    ss_by_month: dict,
+    gastos_by_quarter: dict | None = None,
+    paid: list,
+    today: dt.date,
+    default_cuota: Decimal,
+) -> list[dict]:
+    """Q1–Q4: actual paid installments, then 20% of each remaining quarter's net."""
+    income_by = {int(row["month"]): _d(row["amount"]) for row in months}
+    paid = [_d(x) for x in paid]
+    gastos_by_quarter = gastos_by_quarter or {}
+    rows = []
+    for i, (q, start_m, end_m) in enumerate(_QUARTER_MONTHS):
+        due = m130_due(year, q)
+        income = sum((income_by.get(m, _ZERO) for m in range(start_m, end_m + 1)), _ZERO)
+        ss = sum(
+            (_d(ss_by_month.get(m, default_cuota)) for m in range(start_m, end_m + 1)),
+            _ZERO,
+        )
+        gastos = _d(gastos_by_quarter.get(q))
+        computed = max(_ZERO, (income - ss - gastos) * _IRPF_PAYGO).quantize(
+            _CENTS, rounding=ROUND_HALF_UP
+        )
+        last = calendar.monthrange(year, end_m)[1]
+        ended = today > dt.date(year, end_m, last)
+        if i < len(paid):
+            amount, status = paid[i], "paid"
+        else:
+            amount = computed
+            status = "due" if ended else "forecast"
+        rows.append(
+            {
+                "quarter": q,
+                "start_month": start_m,
+                "end_month": end_m,
+                "due": due,
+                "income": income,
+                "ss": ss,
+                "gastos": gastos,
+                "amount": amount,
+                "status": status,
+            }
+        )
+    return rows
+
+
+def irpf_schedule_name(year: int, quarter: int) -> str:
+    return f"IRPF Pago Fraccionado {year} Q{quarter}"
+
+
+def sync_irpf_recurrences(user, year: int, quarters: list[dict]) -> dict[int, int]:
+    """Upsert one quarterly recurrence per unpaid 130. Deactivate once paid."""
+    tgss = (
+        Recurrence.objects.filter(
+            owner=user, category=Recurrence.CAT_TAX, frequency=Recurrence.FREQ_MONTH
+        )
+        .order_by("id")
+        .first()
+    )
+    account_id = tgss.account_id if tgss else None
+    prefix = f"IRPF Pago Fraccionado {year} Q"
+    existing = {
+        rec.name: rec
+        for rec in Recurrence.objects.filter(owner=user, name__startswith=prefix)
+    }
+    ids = {}
+    for row in quarters:
+        name = irpf_schedule_name(year, row["quarter"])
+        rec = existing.get(name)
+        amount = -_d(row["amount"])
+        due = row["due"]
+        if row["status"] == "paid":
+            if rec and rec.is_active:
+                rec.amount = amount
+                rec.is_active = False
+                rec.save(update_fields=["amount", "is_active"])
+            if rec:
+                ids[row["quarter"]] = rec.id
+            continue
+        fields = {
+            "amount": amount,
+            "currency": "EUR",
+            "frequency": Recurrence.FREQ_QUARTER,
+            "due_day": 20,
+            "start_date": due,
+            "end_date": due,
+            "match_text": "Irpf. Pago Fraccionado",
+            "amount_tolerance_pct": Decimal("100"),
+            "auto_match": True,
+            "category": Recurrence.CAT_TAX,
+            "is_active": True,
+            "account_id": account_id,
+        }
+        if rec:
+            for key, value in fields.items():
+                setattr(rec, key, value)
+            rec.save()
+        else:
+            rec = Recurrence.objects.create(owner=user, name=name, **fields)
+        ids[row["quarter"]] = rec.id
+    return ids
+
+
+def _load_bank_tax(user) -> list[dict]:
+    rows = []
+    qs = Transaction.objects.filter(owner=user).filter(_TAX_TX_Q).order_by(
+        "operation_date", "id"
+    )
+    for tx in qs:
+        hit = classify_payment(tx.concept, tx.counterparty, tx.amount, tx.operation_date)
+        if not hit:
+            continue
+        rows.append(
+            {
+                **hit,
+                "id": tx.id,
+                "date": tx.operation_date.isoformat(),
+                "label": (tx.counterparty or tx.concept)[:80],
+            }
+        )
+    return dedupe_payments(rows)
+
+
+def _invoice_months(user, year: int) -> dict[int, tuple[Decimal, Decimal]]:
+    """service_month → (hours, net)."""
+    out: dict[int, tuple[Decimal, Decimal]] = {}
+    qs = Invoice.objects.filter(owner=user, service_year=year).exclude(
+        status=Invoice.STATUS_DRAFT
+    )
+    for inv in qs:
+        hours, net = out.get(inv.service_month, (_ZERO, _ZERO))
+        out[inv.service_month] = (hours + _d(inv.quantity), net + _d(inv.net_amount))
+    drafts = Invoice.objects.filter(
+        owner=user, service_year=year, status=Invoice.STATUS_DRAFT
+    )
+    for inv in drafts:
+        if inv.service_month in out:
+            continue
+        out[inv.service_month] = (_d(inv.quantity), _d(inv.net_amount))
+    return out
+
+
+def month_hours_plan(profile: TaxProfile, year: int, invoices: dict) -> list[dict]:
+    rate = _d(profile.hourly_rate) or Decimal("30")
+    hpd = int(profile.hours_per_day or 8)
+    overrides = profile.hours_overrides or {}
+    rows = []
+    for month in range(1, 13):
+        days = working_days_in_month(year, month)
+        calendar_hours = Decimal(days * hpd)
+        key = f"{year}-{month:02d}"
+        inv = invoices.get(month)
+        if key in overrides and overrides[key] not in (None, ""):
+            hours = _d(overrides[key])
+            source = "override"
+            amount = (hours * rate).quantize(_CENTS, rounding=ROUND_HALF_UP)
+        elif inv is not None:
+            hours, amount = inv
+            source = "invoice"
+        else:
+            hours = calendar_hours
+            source = "calendar"
+            amount = (hours * rate).quantize(_CENTS, rounding=ROUND_HALF_UP)
+        rows.append(
+            {
+                "month": month,
+                "key": key,
+                "working_days": days,
+                "calendar_hours": _money(calendar_hours),
+                "invoice_hours": _money(inv[0]) if inv else None,
+                "hours": _money(hours),
+                "amount": _money(amount),
+                "source": source,
+            }
+        )
+    return rows
+
+
 def estimate(user, year: int | None = None, today: dt.date | None = None) -> dict:
     today = today or dt.date.today()
     year = year or today.year
@@ -179,51 +488,96 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
     profile = get_or_create_profile(user)
 
     recs = list(
-        Recurrence.objects.filter(owner=user, is_active=True).prefetch_related("occurrences")
+        Recurrence.objects.filter(owner=user, is_active=True).prefetch_related(
+            "occurrences", "tags"
+        )
     )
     income_recs = [r for r in recs if r.category == Recurrence.CAT_INCOME]
-    expense_recs = [
-        r
-        for r in recs
-        if r.category != Recurrence.CAT_TAX
-        and r.category != Recurrence.CAT_INCOME
-        and r.amount < 0
-    ]
+    deduct_ids = set(profile.deductible_tags.values_list("id", flat=True))
+    deduct_recs = _deductible_recurrences(recs, deduct_ids)
     tax_recs = [r for r in recs if r.category == Recurrence.CAT_TAX]
     cuota_recs = [r for r in tax_recs if r.frequency == Recurrence.FREQ_MONTH]
     irpf_recs = [r for r in tax_recs if r.frequency != Recurrence.FREQ_MONTH]
 
+    invoices = _invoice_months(user, year)
+    months = month_hours_plan(profile, year, invoices)
+    hours_ytd = _ZERO
+    hours_planned = _ZERO
+    for row in months:
+        amt = _d(row["amount"])
+        if today.year > year:
+            done = True
+        elif today.year < year:
+            done = False
+        else:
+            done = row["month"] < today.month or (
+                row["month"] == today.month and row["source"] == "invoice"
+            )
+        if done:
+            hours_ytd += amt
+            row["bucket"] = "ytd"
+        else:
+            hours_planned += amt
+            row["bucket"] = "planned"
+
     if profile.income_from == TaxProfile.INCOME_TAGS:
         ytd_income = _tagged_income(user, start, as_of)
-    else:
+        planned_income = hours_planned
+        income_source = "tags"
+    elif profile.income_from == TaxProfile.INCOME_INVOICES:
         ytd_income = _issued_income(user, start, as_of)
-
-    if profile.planned_income_override is not None:
-        planned_income = _d(profile.planned_income_override)
-    else:
         planned_income = _draft_income(user, year) + _recurrence_remaining(
             income_recs, as_of, end
         )
+        income_source = "invoices"
+    else:
+        ytd_income = hours_ytd
+        planned_income = hours_planned
+        income_source = "hours"
+
+    if profile.planned_income_override is not None:
+        planned_income = _d(profile.planned_income_override)
 
     ytd_expenses = _deductible_expenses(user, profile, start, as_of)
-    planned_expenses = _recurrence_remaining(expense_recs, as_of, end)
+    planned_expenses = _recurrence_remaining(deduct_recs, as_of, end)
+
+    bank_tax = [p for p in _load_bank_tax(user) if p["tax_year"] == year]
+    cuota_paid_rows = [p for p in bank_tax if p["kind"] == "cuota"]
+    irpf_paid_rows = [p for p in bank_tax if p["kind"] == "irpf"]
+    irpf_refund_rows = [p for p in bank_tax if p["kind"] == "irpf_refund"]
+
+    ss_paid = sum((_d(p["amount"]) for p in cuota_paid_rows), _ZERO)
+    if not cuota_paid_rows:
+        ss_paid = _tax_paid(cuota_recs, start, as_of)
+
+    irpf_paid = sum((_d(p["amount"]) for p in irpf_paid_rows), _ZERO)
+    irpf_paid -= sum((_d(p["amount"]) for p in irpf_refund_rows), _ZERO)
+    if not irpf_paid_rows and not irpf_refund_rows:
+        irpf_paid = _tax_paid(irpf_recs, start, as_of)
+
+    paid_cuota_months = {p["period_month"] for p in cuota_paid_rows if p.get("period_month")}
+    if today.year > year:
+        unpaid_cuota_months = []
+    elif today.year < year:
+        unpaid_cuota_months = list(range(1, 13))
+    else:
+        unpaid_cuota_months = [
+            m for m in range(today.month, 13) if m not in paid_cuota_months
+        ]
+    months_left = _months_left(as_of, year)
 
     ingresos = ytd_income + planned_income
-    gastos = ytd_expenses + planned_expenses
-    gross_net = ingresos - gastos
-    simplificada = _ZERO
-    if profile.simplificada and gross_net > 0:
-        simplificada = min(gross_net * _SIMPLIFICADA_RATE, _SIMPLIFICADA_CAP)
-        simplificada = simplificada.quantize(_CENTS, rounding=ROUND_HALF_UP)
-    rendimiento = gross_net - simplificada
+    last_cuota = _d(cuota_paid_rows[-1]["amount"]) if cuota_paid_rows else _ZERO
+    table_cuota = reta_cuota((ingresos / Decimal("12")) if ingresos else _ZERO, year)
 
-    months_left = _months_left(as_of, year)
-    monthly_net = (rendimiento / Decimal("12")) if year else _ZERO
     if profile.ss_mode == TaxProfile.SS_FIXED and profile.ss_cuota_override is not None:
         cuota = abs(_d(profile.ss_cuota_override))
         ss_source = "fixed"
+    elif last_cuota:
+        cuota = last_cuota
+        ss_source = "last_paid"
     else:
-        cuota = reta_cuota(monthly_net, year)
+        cuota = table_cuota
         ss_source = "table"
     tarifa = False
     if profile.new_autonomo_start:
@@ -233,46 +587,81 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
             tarifa = True
             ss_source = "tarifa_plana"
 
-    ss_paid = _tax_paid(cuota_recs, start, as_of)
-    ss_scheduled = _recurrence_remaining(cuota_recs, as_of, end)
-    ss_projected_remaining = cuota * months_left
-    ss_remaining = ss_scheduled if cuota_recs else ss_projected_remaining
+    if cuota_paid_rows:
+        ss_remaining = cuota * Decimal(len(unpaid_cuota_months))
+    elif cuota_recs:
+        ss_remaining = _recurrence_remaining(cuota_recs, as_of, end)
+    else:
+        ss_remaining = cuota * Decimal(months_left)
     ss_year = ss_paid + ss_remaining
+
+    # SS cuota is a deductible gasto for modelo 130.
+    gastos = ytd_expenses + planned_expenses + ss_year
+    gross_net = ingresos - gastos
+    simplificada = _ZERO
+    if profile.simplificada and gross_net > 0:
+        simplificada = min(gross_net * _SIMPLIFICADA_RATE, _SIMPLIFICADA_CAP)
+        simplificada = simplificada.quantize(_CENTS, rounding=ROUND_HALF_UP)
+    rendimiento = gross_net - simplificada
+
+    ss_by_month = {
+        p["period_month"]: _d(p["amount"])
+        for p in cuota_paid_rows
+        if p.get("period_month")
+    }
+    gastos_by_quarter = {
+        q: _quarter_gastos(user, profile, year, start_m, end_m, today, deduct_recs)
+        for q, start_m, end_m in _QUARTER_MONTHS
+    }
+    quarters = modelo_130_quarters(
+        year=year,
+        months=months,
+        ss_by_month=ss_by_month,
+        gastos_by_quarter=gastos_by_quarter,
+        paid=[p["amount"] for p in irpf_paid_rows],
+        today=today,
+        default_cuota=cuota,
+    )
+    rec_ids = sync_irpf_recurrences(user, year, quarters)
+    unpaid_130 = [q for q in quarters if q["status"] != "paid"]
+    m130_this = unpaid_130[0]["amount"] if unpaid_130 else _ZERO
+    m130_remaining = sum((q["amount"] for q in unpaid_130), _ZERO)
+    m130_scheduled = m130_remaining
 
     withholdings = (ytd_income * _d(profile.withholding_rate) / Decimal("100")).quantize(
         _CENTS, rounding=ROUND_HALF_UP
     )
 
-    ytd_net_for_130 = ytd_income - ytd_expenses
-    if profile.simplificada and ytd_net_for_130 > 0:
-        ytd_simp = min(ytd_net_for_130 * _SIMPLIFICADA_RATE, _SIMPLIFICADA_CAP)
-        ytd_net_for_130 -= ytd_simp.quantize(_CENTS, rounding=ROUND_HALF_UP)
-    irpf_paid = _tax_paid(irpf_recs, start, as_of)
-    m130_accrued = max(_ZERO, ytd_net_for_130 * _IRPF_PAYGO)
-    m130_this = max(_ZERO, m130_accrued - irpf_paid - withholdings)
-    m130_scheduled = _recurrence_remaining(irpf_recs, as_of, end)
-    m130_projected = max(_ZERO, rendimiento * _IRPF_PAYGO)
-    m130_remaining = max(_ZERO, m130_projected - irpf_paid - withholdings)
-
-    irpf_base = max(_ZERO, rendimiento - ss_year)
+    irpf_base = max(_ZERO, rendimiento)
     irpf_annual = apply_scale(irpf_base, _tables(year, IRPF_SCALE))
     irpf_already = irpf_paid + withholdings + m130_scheduled
     renta_remainder = irpf_annual - irpf_already
 
-    set_aside = ss_remaining + m130_remaining + max(_ZERO, renta_remainder)
+    set_aside = ss_remaining + m130_remaining
 
     remaining_payments = []
-    for rec in tax_recs:
-        for occ in remaining_dates(rec, as_of, end):
-            remaining_payments.append(
-                {
-                    "recurrence": rec.id,
-                    "name": rec.name,
-                    "date": occ.isoformat(),
-                    "amount": _money(abs(_d(rec.amount))),
-                    "kind": "cuota" if rec.frequency == Recurrence.FREQ_MONTH else "irpf",
-                }
-            )
+    for month in unpaid_cuota_months:
+        last = calendar.monthrange(year, month)[1]
+        remaining_payments.append(
+            {
+                "recurrence": None,
+                "name": "RETA cuota",
+                "date": dt.date(year, month, last).isoformat(),
+                "amount": _money(cuota),
+                "kind": "cuota",
+            }
+        )
+    for q in unpaid_130:
+        remaining_payments.append(
+            {
+                "recurrence": rec_ids.get(q["quarter"]),
+                "name": irpf_schedule_name(year, q["quarter"]),
+                "date": q["due"].isoformat(),
+                "amount": _money(q["amount"]),
+                "kind": "irpf",
+                "status": q["status"],
+            }
+        )
     remaining_payments.sort(key=lambda r: r["date"])
 
     return {
@@ -281,18 +670,22 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
         "tables_year": year if year in IRPF_SCALE else max(IRPF_SCALE),
         "disclaimer": (
             "Estimator only — not tax advice. Uses 2026 estatal IRPF scale and RETA "
-            "minimum cuota. Regional IRPF and IVA (modelo 303) are not included."
+            "minimum cuota. Regional IRPF and IVA (modelo 303) are not included. "
+            "Duplicate bank imports are counted once."
         ),
         "income": {
             "ytd": _money(ytd_income),
             "planned": _money(planned_income),
             "total": _money(ingresos),
-            "source": profile.income_from,
+            "source": income_source,
             "override": profile.planned_income_override is not None,
+            "hourly_rate": _money(_d(profile.hourly_rate) or Decimal("30")),
+            "hours_per_day": int(profile.hours_per_day or 8),
         },
         "expenses": {
             "ytd": _money(ytd_expenses),
             "planned": _money(planned_expenses),
+            "ss": _money(ss_year),
             "total": _money(gastos),
         },
         "simplificada": _money(simplificada),
@@ -300,6 +693,7 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
         "ss": {
             "source": ss_source,
             "monthly_cuota": _money(cuota),
+            "statutory_min": _money(table_cuota),
             "tarifa_plana": tarifa,
             "paid": _money(ss_paid),
             "remaining": _money(ss_remaining),
@@ -312,6 +706,20 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
             "withholdings": _money(withholdings),
             "scheduled": _money(m130_scheduled),
             "remaining": _money(m130_remaining),
+            "quarters": [
+                {
+                    "quarter": q["quarter"],
+                    "period": f"{q['start_month']:02d}–{q['end_month']:02d}",
+                    "due": q["due"].isoformat(),
+                    "income": _money(q["income"]),
+                    "ss": _money(q["ss"]),
+                    "gastos": _money(q["gastos"]),
+                    "amount": _money(q["amount"]),
+                    "status": q["status"],
+                    "recurrence": rec_ids.get(q["quarter"]),
+                }
+                for q in quarters
+            ],
         },
         "irpf_annual": {
             "base": _money(irpf_base),
@@ -320,6 +728,17 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
             "renta_remainder": _money(renta_remainder),
         },
         "set_aside": _money(max(_ZERO, set_aside)),
+        "months": months,
+        "paid_payments": [
+            {
+                "id": p["id"],
+                "date": p["date"],
+                "name": p["label"],
+                "kind": p["kind"],
+                "amount": _money(p["amount"] if p["kind"] != "irpf_refund" else -p["amount"]),
+            }
+            for p in bank_tax
+        ],
         "remaining_payments": remaining_payments,
         "profile_id": profile.id,
     }
