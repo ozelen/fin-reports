@@ -4,7 +4,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import re
+import subprocess
+import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -16,8 +19,11 @@ from django.utils import timezone
 
 from .models import PurchaseItem, Receipt, Tag, Transaction, TransactionTag
 
+log = logging.getLogger(__name__)
+
 IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 DATE_WINDOW_DAYS = 5
+INVOICE_DATE_WINDOW_DAYS = 45
 AMOUNT_TOLERANCE = Decimal("0.02")
 
 EXTRACT_PROMPT = (
@@ -49,6 +55,12 @@ def date_close(a: dt.date | None, b: dt.date | None, days: int = DATE_WINDOW_DAY
     if a is None or b is None:
         return False
     return abs((a - b).days) <= days
+
+
+def window_days(receipt: Receipt | None) -> int:
+    if receipt is not None and receipt.kind == Receipt.KIND_INVOICE:
+        return INVOICE_DATE_WINDOW_DAYS
+    return DATE_WINDOW_DAYS
 
 
 def parse_amount(value) -> Decimal | None:
@@ -85,7 +97,14 @@ def merchant_overlap(merchant: str, tx: Transaction) -> bool:
     return any(tok in hay for tok in needle.split() if len(tok) >= 4)
 
 
-def candidate_transactions(user, amount, document_date, currency: str = "", limit: int = 8):
+def candidate_transactions(
+    user,
+    amount,
+    document_date,
+    currency: str = "",
+    limit: int = 8,
+    days: int = DATE_WINDOW_DAYS,
+):
     """Bank txs that could belong to this receipt. Amount is required to match."""
     amount = parse_amount(amount)
     if amount is None:
@@ -101,19 +120,30 @@ def candidate_transactions(user, amount, document_date, currency: str = "", limi
     )
     document_date = parse_date(document_date)
     if document_date:
-        start = document_date - dt.timedelta(days=DATE_WINDOW_DAYS)
-        end = document_date + dt.timedelta(days=DATE_WINDOW_DAYS)
+        start = document_date - dt.timedelta(days=days)
+        end = document_date + dt.timedelta(days=days)
         qs = qs.filter(operation_date__gte=start, operation_date__lte=end)
     else:
         qs = qs.filter(operation_date__gte=dt.date.today() - dt.timedelta(days=90))
     return qs.order_by("-operation_date", "-id")[:limit]
 
 
-def unique_auto_match(user, amount, document_date, currency: str = "", merchant: str = ""):
+def unique_auto_match(
+    user,
+    amount,
+    document_date,
+    currency: str = "",
+    merchant: str = "",
+    days: int = DATE_WINDOW_DAYS,
+):
     """Single obvious tx, or None. Date+amount unique, else amount+merchant unique."""
     if parse_amount(amount) is None:
         return None
-    matches = list(candidate_transactions(user, amount, document_date, currency, limit=12))
+    matches = list(
+        candidate_transactions(
+            user, amount, document_date, currency, limit=12, days=days
+        )
+    )
     if parse_date(document_date) is not None and len(matches) == 1:
         return matches[0]
     named = [tx for tx in matches if merchant_overlap(merchant, tx)]
@@ -122,22 +152,38 @@ def unique_auto_match(user, amount, document_date, currency: str = "", merchant:
     return None
 
 
+def try_match_receipt(receipt: Receipt) -> Receipt:
+    """Link a unique bank tx, or hang a placeholder until one lands."""
+    tx = receipt.transaction
+    if tx is not None and tx.upload_id:
+        return receipt
+    if receipt.amount is None:
+        return receipt
+    match = unique_auto_match(
+        receipt.owner,
+        receipt.amount,
+        receipt.document_date,
+        receipt.currency,
+        merchant=receipt.merchant,
+        days=window_days(receipt),
+    )
+    if match is not None:
+        link_receipt(receipt, match)
+    else:
+        ensure_placeholder(receipt)
+    return receipt
+
+
 def match_pending_receipts(user) -> int:
     """Attach unmatched receipts that now have exactly one obvious bank tx."""
     attached = 0
-    pending = Receipt.objects.filter(
-        owner=user, transaction__isnull=True, amount__isnull=False
+    pending = Receipt.objects.filter(owner=user, amount__isnull=False).filter(
+        Q(transaction__isnull=True) | Q(transaction__upload__isnull=True)
     )
-    for receipt in pending:
-        match = unique_auto_match(
-            user,
-            receipt.amount,
-            receipt.document_date,
-            receipt.currency,
-            merchant=receipt.merchant,
-        )
-        if match is not None:
-            link_receipt(receipt, match)
+    for receipt in pending.select_related("transaction"):
+        try_match_receipt(receipt)
+        receipt.refresh_from_db()
+        if receipt.transaction_id and receipt.transaction.upload_id:
             attached += 1
     return attached
 
@@ -159,7 +205,9 @@ def attach_new_transactions(user, transactions) -> int:
             if receipt.currency and receipt.currency.upper() != (tx.currency or "").upper():
                 continue
             if receipt.document_date:
-                if not date_close(receipt.document_date, tx.operation_date):
+                if not date_close(
+                    receipt.document_date, tx.operation_date, window_days(receipt)
+                ):
                     continue
             elif not merchant_overlap(receipt.merchant, tx):
                 continue
@@ -259,6 +307,7 @@ def absorb_statement_rows(user, rows, upload, account) -> tuple[list, int]:
     """Fold matching statement rows into receipt placeholders. Return (to_create, enriched)."""
     pending = list(
         Transaction.objects.filter(owner=user, upload__isnull=True, account__isnull=True)
+        .prefetch_related("receipts")
     )
     used: set[int] = set()
     to_create = []
@@ -343,7 +392,8 @@ def _pick_pending(pending, used, row):
             continue
         if currency and tx.currency and currency != (tx.currency or "").upper():
             continue
-        if not date_close(tx.operation_date, date):
+        rec = next(iter(tx.receipts.all()), None)
+        if not date_close(tx.operation_date, date, window_days(rec)):
             continue
         hits.append(tx)
     if len(hits) == 1:
@@ -454,15 +504,21 @@ def sync_tx_tags_from_items(tx: Transaction) -> None:
 
 
 def extract_from_image(image_bytes: bytes, mime: str, caption: str = "") -> dict:
-    """Vision pass. Returns {} if Gemini is not configured or the file is not an image."""
+    """Vision pass on a photo or PDF. Returns {} if Gemini is not configured."""
     from .ai import AiNotConfigured, AiUnavailable, get_client, user_message_for_ai_error
 
-    if mime not in IMAGE_MIMES:
-        if image_bytes[:3] == b"\xff\xd8\xff":
-            mime = "image/jpeg"
-        elif image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-            mime = "image/png"
-    if mime not in IMAGE_MIMES:
+    parts: list[tuple[str, bytes]] = []
+    if _looks_like_pdf(image_bytes, mime):
+        parts = [("image/png", png) for png in _pdf_page_pngs(image_bytes)]
+    else:
+        if mime not in IMAGE_MIMES:
+            if image_bytes[:3] == b"\xff\xd8\xff":
+                mime = "image/jpeg"
+            elif image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+        if mime in IMAGE_MIMES:
+            parts = [(mime, image_bytes)]
+    if not parts:
         return {}
     try:
         client = get_client()
@@ -471,24 +527,25 @@ def extract_from_image(image_bytes: bytes, mime: str, caption: str = "") -> dict
 
     import base64
 
-    data_url = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
     user_text = EXTRACT_PROMPT
     if caption:
         user_text += f" User caption: {caption}"
+    content = [{"type": "text", "text": user_text}]
+    for part_mime, blob in parts:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{part_mime};base64,{base64.b64encode(blob).decode('ascii')}"
+                },
+            }
+        )
     try:
         response = client.chat.completions.create(
             model=settings.GEMINI_MODEL,
             temperature=0,
             response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_text},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ],
-                }
-            ],
+            messages=[{"role": "user", "content": content}],
         )
     except Exception as exc:  # noqa: BLE001 - turn provider errors into a chat reply
         raise AiUnavailable(user_message_for_ai_error(exc)) from exc
@@ -504,17 +561,30 @@ def apply_extracted(receipt: Receipt, extracted: dict, caption: str = "") -> Non
             receipt.notes = caption
         return
     receipt.extracted = extracted
-    receipt.merchant = (extracted.get("merchant") or "")[:255]
-    receipt.amount = parse_amount(extracted.get("amount"))
-    receipt.currency = (extracted.get("currency") or receipt.currency or "EUR")[:8]
-    receipt.document_date = parse_date(extracted.get("date"))
+    merchant = (extracted.get("merchant") or "").strip()
+    if merchant:
+        receipt.merchant = merchant[:255]
+    amount = parse_amount(extracted.get("amount"))
+    if amount is not None:
+        receipt.amount = amount
+    currency = (extracted.get("currency") or "").strip()
+    if currency:
+        receipt.currency = currency[:8]
+    date = parse_date(extracted.get("date"))
+    if date:
+        receipt.document_date = date
     kind = extracted.get("kind") or ""
-    if kind in {Receipt.KIND_RECEIPT, Receipt.KIND_INVOICE, Receipt.KIND_OTHER}:
+    if receipt.kind != Receipt.KIND_INVOICE and kind in {
+        Receipt.KIND_RECEIPT,
+        Receipt.KIND_INVOICE,
+        Receipt.KIND_OTHER,
+    }:
         receipt.kind = kind
     notes = extracted.get("notes") or ""
     if caption:
         notes = f"{caption}\n{notes}".strip()
-    receipt.notes = notes
+    if notes:
+        receipt.notes = notes
 
 
 def line_from_raw(raw: dict) -> dict | None:
@@ -582,7 +652,7 @@ def save_receipt(
         receipt.file.save(
             Path(filename).name or "receipt.bin", ContentFile(data), save=True
         )
-    if _looks_like_image(data, mime_type) and not extract:
+    if not extract and _can_parse(data, mime_type):
         receipt.needs_parse = True
         receipt.save(update_fields=["needs_parse"])
         return receipt
@@ -626,7 +696,7 @@ def parse_queued_receipt(receipt: Receipt) -> bool:
                 ContentFile(data),
                 save=True,
             )
-    if not _looks_like_image(data, mime):
+    if not _can_parse(data, mime):
         receipt.needs_parse = False
         receipt.save(update_fields=["needs_parse"])
         return True
@@ -636,6 +706,46 @@ def parse_queued_receipt(receipt: Receipt) -> bool:
         return False
     _finish_parse(receipt, extracted, receipt.notes)
     return True
+
+
+def _looks_like_pdf(data: bytes, mime: str) -> bool:
+    mime = (mime or "").lower()
+    if mime in {"application/pdf", "application/x-pdf"} or mime.endswith("/pdf"):
+        return True
+    return (data or b"")[:5] == b"%PDF-"
+
+
+def _can_parse(data: bytes, mime: str) -> bool:
+    return _looks_like_image(data, mime) or _looks_like_pdf(data, mime)
+
+
+def _pdf_page_pngs(data: bytes, max_pages: int = 3) -> list[bytes]:
+    """Rasterize invoice/receipt PDF pages for the same vision path as photos."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "doc.pdf"
+        src.write_bytes(data)
+        prefix = Path(tmp) / "page"
+        try:
+            subprocess.run(
+                [
+                    "pdftoppm",
+                    "-png",
+                    "-r",
+                    "150",
+                    "-f",
+                    "1",
+                    "-l",
+                    str(max_pages),
+                    str(src),
+                    str(prefix),
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            log.warning("pdftoppm failed: %s", exc)
+            return []
+        return [p.read_bytes() for p in sorted(Path(tmp).glob("page*.png"))]
 
 
 def _looks_like_image(data: bytes, mime: str) -> bool:
@@ -653,17 +763,7 @@ def _finish_parse(receipt: Receipt, extracted: dict, caption: str = "") -> Recei
     apply_extracted(receipt, extracted, caption)
     receipt.needs_parse = False
     receipt.save()
-    match = unique_auto_match(
-        receipt.owner,
-        receipt.amount,
-        receipt.document_date,
-        receipt.currency,
-        merchant=receipt.merchant,
-    )
-    if match is not None:
-        link_receipt(receipt, match)
-    else:
-        ensure_placeholder(receipt)
+    try_match_receipt(receipt)
     replace_items(receipt, extracted.get("items") if extracted else None)
     apply_receipt_history(receipt)
     tag_items_from_categories(receipt)

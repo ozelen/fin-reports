@@ -1,4 +1,5 @@
 from decimal import Decimal
+import datetime as dt
 
 from rest_framework import serializers
 
@@ -556,6 +557,7 @@ class TransactionSerializer(serializers.ModelSerializer):
     tags = TransactionTagSerializer(source="tag_links", many=True, read_only=True)
     account_label = serializers.CharField(source="account.name", read_only=True)
     receipt_id = serializers.SerializerMethodField()
+    receipt_kind = serializers.SerializerMethodField()
     item_count = serializers.SerializerMethodField()
     recurrence = serializers.IntegerField(
         source="recurrence_id", read_only=True, allow_null=True
@@ -581,6 +583,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             "account",
             "account_label",
             "receipt_id",
+            "receipt_kind",
             "item_count",
             "recurrence",
             "recurrence_name",
@@ -590,6 +593,9 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     def get_receipt_id(self, obj):
         return getattr(obj, "receipt_id", None)
+
+    def get_receipt_kind(self, obj):
+        return getattr(obj, "receipt_kind", None)
 
     def get_item_count(self, obj):
         return getattr(obj, "item_count", 0) or 0
@@ -707,6 +713,8 @@ class ReceiptSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
     kind_label = serializers.CharField(source="get_kind_display", read_only=True)
     details = serializers.SerializerMethodField()
+    paid = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
 
     class Meta:
         model = Receipt
@@ -720,13 +728,29 @@ class ReceiptSerializer(serializers.ModelSerializer):
             "document_date",
             "notes",
             "original_filename",
+            "mime_type",
             "file_url",
             "details",
             "transaction",
             "items",
             "created_at",
+            "paid",
+            "status",
         ]
-        read_only_fields = fields
+        read_only_fields = [
+            "id",
+            "kind",
+            "kind_label",
+            "original_filename",
+            "mime_type",
+            "file_url",
+            "details",
+            "transaction",
+            "items",
+            "created_at",
+            "paid",
+            "status",
+        ]
 
     def get_file_url(self, obj):
         if not obj.file:
@@ -745,3 +769,14 @@ class ReceiptSerializer(serializers.ModelSerializer):
                 continue
             out[key] = value
         return out
+
+    def get_paid(self, obj):
+        tx = obj.transaction
+        return bool(tx and tx.upload_id)
+
+    def get_status(self, obj):
+        if self.get_paid(obj):
+            return "paid"
+        if obj.document_date and obj.document_date < dt.date.today():
+            return "overdue"
+        return "unpaid"

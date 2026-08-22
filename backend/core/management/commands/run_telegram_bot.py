@@ -13,7 +13,8 @@ from django.db.models import Q
 
 from core import agent, telegram as tg
 from core.ai import AiNotConfigured, AiUnavailable
-from core.models import Account, PurchaseItem, Receipt, TelegramLink, Upload
+from core.filing import classify_upload, pdf_creation_date, save_personal_document
+from core.models import Account, Document, PurchaseItem, Receipt, TelegramLink, Upload
 from core.parsing import (
     ParseError,
     UnsupportedFormat,
@@ -29,6 +30,7 @@ from core.receipts import (
     parse_queued_receipt,
     pending_parse_qs,
     save_receipt,
+    window_days,
 )
 
 log = logging.getLogger("telegram_bot")
@@ -210,6 +212,10 @@ def _handle_message(message: dict) -> None:
             n = pending_parse_qs(owner).count()
             _say(chat_id, f"Queued {_file_role(filename, mime)} #{rid} ({n} in parse queue)")
             return
+        if extra.startswith("Saved "):
+            _say(chat_id, extra)
+            _note_history(link, text or f"(sent {filename})", extra)
+            return
         if extra.startswith("[Imported"):
             _note_history(link, text or f"(sent {filename})", extra)
             return
@@ -299,7 +305,12 @@ def _handle_media_group(messages: list[dict]) -> None:
         _note_history(link, caption or f"(sent {len(files)} files)", "\n\n".join(imported))
     other = [e for e in extras if not e.startswith("[Imported")]
     if other:
-        _complete_turn(link, owner, chat_id, caption, "\n\n".join(other))
+        for line in other:
+            if line.startswith("Saved "):
+                _say(chat_id, line)
+        rest = [e for e in other if not e.startswith("Saved ")]
+        if rest:
+            _complete_turn(link, owner, chat_id, caption, "\n\n".join(rest))
 
 
 def _say(chat_id, text: str, reply_markup: dict | None = None) -> None:
@@ -309,14 +320,24 @@ def _say(chat_id, text: str, reply_markup: dict | None = None) -> None:
 def _file_role(filename: str, mime: str = "", data: bytes = b"") -> str:
     if is_statement_file(filename, mime, data):
         return "statement"
-    low = f"{filename or ''} {mime or ''}".lower()
-    if low.endswith(".pdf") or "pdf" in (mime or "").lower():
-        return "invoice"
-    return "receipt"
+    kind = classify_upload(filename)
+    return {
+        "invoice": "invoice",
+        Document.KIND_TAX_DECLARATION: "declaration",
+        Document.KIND_TAX_CERTIFICATE: "certificate",
+        "other_document": "document",
+    }.get(kind, "receipt")
 
 
 def _identified_line(roles: dict) -> str:
-    labels = (("receipt", "receipts"), ("invoice", "invoices"), ("statement", "statements"))
+    labels = (
+        ("receipt", "receipts"),
+        ("invoice", "invoices"),
+        ("declaration", "declarations"),
+        ("certificate", "certificates"),
+        ("document", "documents"),
+        ("statement", "statements"),
+    )
     bits = [f"{label}: {roles[key]}" for key, label in labels if roles.get(key)]
     return "Identified " + ", ".join(bits) if bits else ""
 
@@ -352,6 +373,17 @@ def _ingest_file(
     if is_statement_file(filename, mime, data):
         extra = _handle_statement(link, owner, chat_id, data, filename, caption)
         return extra or "", extra is None
+    kind = classify_upload(filename)
+    if kind in (
+        Document.KIND_TAX_DECLARATION,
+        Document.KIND_TAX_CERTIFICATE,
+        "other_document",
+    ):
+        doc_kind = (
+            Document.KIND_OTHER if kind == "other_document" else kind
+        )
+        doc = save_personal_document(owner, data, filename, doc_kind)
+        return f"Saved {doc.get_kind_display()}: {doc.title}", False
     if link.pending_item_id and (message.get("photo") or []):
         item = PurchaseItem.objects.filter(
             id=link.pending_item_id, receipt__owner=owner
@@ -376,6 +408,10 @@ def _ingest_file(
         telegram_file_id=file_id,
         extract=False,
     )
+    if kind == "invoice":
+        receipt.kind = Receipt.KIND_INVOICE
+        receipt.document_date = receipt.document_date or pdf_creation_date(data)
+        receipt.save(update_fields=["kind", "document_date"])
     return f"queued:{receipt.id}", False
 
 
@@ -662,7 +698,11 @@ def _receipt_context(receipt: Receipt) -> str:
         return "\n".join(parts)
     hits = list(
         candidate_transactions(
-            receipt.owner, receipt.amount, receipt.document_date, receipt.currency
+            receipt.owner,
+            receipt.amount,
+            receipt.document_date,
+            receipt.currency,
+            days=window_days(receipt),
         )
     )
     if hits:

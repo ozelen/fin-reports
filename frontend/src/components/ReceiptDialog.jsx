@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import {
   Box,
   Button,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Stack,
+  TextField,
   Typography,
 } from "@mui/material";
 import { DataGrid } from "@mui/x-data-grid";
@@ -22,6 +24,12 @@ const money = (v, code) =>
       }).format(v);
 
 const KNOWN = ["time", "location", "payment_method", "card_last4"];
+
+function isPdf(receipt) {
+  const name = (receipt.original_filename || "").toLowerCase();
+  const mime = (receipt.mime_type || "").toLowerCase();
+  return name.endsWith(".pdf") || mime.includes("pdf");
+}
 
 function factRows(receipt) {
   const d = receipt.details || {};
@@ -58,6 +66,21 @@ export default function ReceiptDialog({
   const [preview, setPreview] = useState("");
   const [error, setError] = useState("");
   const [tagEditor, setTagEditor] = useState(null);
+  const [form, setForm] = useState({ merchant: "", amount: "", document_date: "" });
+  const [matches, setMatches] = useState([]);
+  const [saving, setSaving] = useState(false);
+
+  const loadReceipt = async (id) => {
+    const { data } = await api.get(`/receipts/${id}/`);
+    setReceipt(data);
+    setItems(data.items || []);
+    setForm({
+      merchant: data.merchant || "",
+      amount: data.amount ?? "",
+      document_date: data.document_date || "",
+    });
+    return data;
+  };
 
   useEffect(() => {
     if (!receiptId) return;
@@ -65,14 +88,13 @@ export default function ReceiptDialog({
     setPreview("");
     setReceipt(null);
     setItems([]);
+    setMatches([]);
     let objectUrl = "";
     let cancelled = false;
-    api
-      .get(`/receipts/${receiptId}/`)
-      .then(async ({ data }) => {
+    (async () => {
+      try {
+        const data = await loadReceipt(receiptId);
         if (cancelled) return;
-        setReceipt(data);
-        setItems(data.items || []);
         if (data.file_url) {
           const res = await api.get(`/receipts/${receiptId}/download/`, {
             responseType: "blob",
@@ -84,10 +106,16 @@ export default function ReceiptDialog({
           }
           setPreview(objectUrl);
         }
-      })
-      .catch((e) => {
+        if (data.kind === "invoice" && !data.paid) {
+          const { data: hits } = await api.get(`/receipts/${receiptId}/matches/`);
+          if (!cancelled) {
+            setMatches(Array.isArray(hits) ? hits : hits?.results || []);
+          }
+        }
+      } catch (e) {
         if (!cancelled) setError(e.response?.data?.detail || e.message);
-      });
+      }
+    })();
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -134,6 +162,45 @@ export default function ReceiptDialog({
     return newRow;
   };
 
+  const saveInvoice = async () => {
+    setError("");
+    setSaving(true);
+    try {
+      await api.patch(`/receipts/${receiptId}/`, {
+        merchant: form.merchant,
+        amount: form.amount === "" ? null : form.amount,
+        document_date: form.document_date || null,
+      });
+      const data = await loadReceipt(receiptId);
+      onSaved?.();
+      if (data.kind === "invoice" && !data.paid) {
+        const { data: hits } = await api.get(`/receipts/${receiptId}/matches/`);
+        setMatches(hits);
+      } else {
+        setMatches([]);
+      }
+    } catch (e) {
+      setError(e.response?.data?.detail || JSON.stringify(e.response?.data) || e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const attachMatch = async (txId) => {
+    setError("");
+    setSaving(true);
+    try {
+      await api.post(`/receipts/${receiptId}/attach/`, { transaction: txId });
+      await loadReceipt(receiptId);
+      setMatches([]);
+      onSaved?.();
+    } catch (e) {
+      setError(e.response?.data?.detail || JSON.stringify(e.response?.data) || e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const columns = [
     { field: "title", headerName: "Title", flex: 1, minWidth: 140, editable: true },
     { field: "name", headerName: "Printed", flex: 1, minWidth: 140, editable: true },
@@ -178,7 +245,7 @@ export default function ReceiptDialog({
       >
         <DialogTitle>
           {receipt
-            ? `${receipt.merchant || "Receipt"} · ${money(receipt.amount, receipt.currency)}`
+            ? `${receipt.kind === "invoice" ? "Invoice" : "Receipt"} · ${receipt.merchant || receipt.original_filename || `#${receipt.id}`} · ${money(receipt.amount, receipt.currency)}`
             : "Receipt"}
         </DialogTitle>
         <DialogContent dividers>
@@ -190,50 +257,147 @@ export default function ReceiptDialog({
           {receipt && (
             <Stack spacing={2}>
               <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
-                {preview && (
-                  <Box
-                    component="img"
-                    src={preview}
-                    alt={receipt.original_filename || "receipt"}
-                    sx={{
-                      maxHeight: 360,
-                      maxWidth: { md: 280 },
-                      objectFit: "contain",
-                      borderRadius: 1,
-                      bgcolor: "grey.100",
-                      alignSelf: "flex-start",
-                    }}
-                  />
-                )}
-                <Stack spacing={0.5} sx={{ minWidth: 200 }}>
-                  {facts.map(([label, value]) => (
-                    <Typography key={label} variant="body2">
-                      <Box component="span" sx={{ color: "text.secondary", mr: 1 }}>
-                        {label}
-                      </Box>
-                      {value}
-                    </Typography>
+                {preview &&
+                  (isPdf(receipt) ? (
+                    <Box
+                      component="iframe"
+                      src={preview}
+                      title={receipt.original_filename || "invoice"}
+                      sx={{
+                        height: 360,
+                        width: { xs: "100%", md: 280 },
+                        border: 0,
+                        borderRadius: 1,
+                        bgcolor: "grey.100",
+                        alignSelf: "flex-start",
+                      }}
+                    />
+                  ) : (
+                    <Box
+                      component="img"
+                      src={preview}
+                      alt={receipt.original_filename || "receipt"}
+                      sx={{
+                        maxHeight: 360,
+                        maxWidth: { md: 280 },
+                        objectFit: "contain",
+                        borderRadius: 1,
+                        bgcolor: "grey.100",
+                        alignSelf: "flex-start",
+                      }}
+                    />
                   ))}
-                  {facts.length === 0 && (
-                    <Typography variant="body2" color="text.secondary">
-                      No extra details parsed.
-                    </Typography>
+                <Stack spacing={1} sx={{ minWidth: 200, flex: 1 }}>
+                  {receipt.kind === "invoice" && (
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Chip
+                        size="small"
+                        color={
+                          receipt.status === "paid"
+                            ? "success"
+                            : receipt.status === "overdue"
+                              ? "error"
+                              : "warning"
+                        }
+                        label={
+                          receipt.status === "paid"
+                            ? "Paid"
+                            : receipt.status === "overdue"
+                              ? "Overdue"
+                              : "Unpaid"
+                        }
+                      />
+                    </Stack>
+                  )}
+                  {receipt.kind === "invoice" ? (
+                    <>
+                      <TextField
+                        label="Merchant"
+                        size="small"
+                        value={form.merchant}
+                        onChange={(e) => setForm({ ...form, merchant: e.target.value })}
+                      />
+                      <TextField
+                        label="Amount"
+                        size="small"
+                        type="number"
+                        value={form.amount}
+                        onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                      />
+                      <TextField
+                        label="Date"
+                        size="small"
+                        type="date"
+                        InputLabelProps={{ shrink: true }}
+                        value={form.document_date}
+                        onChange={(e) =>
+                          setForm({ ...form, document_date: e.target.value })
+                        }
+                      />
+                      <Button
+                        variant="contained"
+                        size="small"
+                        onClick={saveInvoice}
+                        disabled={saving}
+                        sx={{ alignSelf: "flex-start" }}
+                      >
+                        Save & match
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      {facts.map(([label, value]) => (
+                        <Typography key={label} variant="body2">
+                          <Box component="span" sx={{ color: "text.secondary", mr: 1 }}>
+                            {label}
+                          </Box>
+                          {value}
+                        </Typography>
+                      ))}
+                      {facts.length === 0 && (
+                        <Typography variant="body2" color="text.secondary">
+                          No extra details parsed.
+                        </Typography>
+                      )}
+                    </>
+                  )}
+                  {receipt.kind === "invoice" && !receipt.paid && matches.length > 0 && (
+                    <Stack spacing={0.5}>
+                      <Typography variant="body2" color="text.secondary">
+                        Matching transactions — click to mark paid
+                      </Typography>
+                      {matches.map((tx) => (
+                        <Button
+                          key={tx.id}
+                          size="small"
+                          variant="outlined"
+                          disabled={saving}
+                          onClick={() => attachMatch(tx.id)}
+                          sx={{ justifyContent: "flex-start", textTransform: "none" }}
+                        >
+                          #{tx.id} {tx.operation_date} {money(tx.amount, tx.currency)}{" "}
+                          {(tx.counterparty || tx.concept || "").slice(0, 48)}
+                        </Button>
+                      ))}
+                    </Stack>
                   )}
                 </Stack>
               </Stack>
-              <DataGrid
-                autoHeight
-                rows={items}
-                columns={columns}
-                hideFooter
-                disableRowSelectionOnClick
-                getRowHeight={() => "auto"}
-                processRowUpdate={processRowUpdate}
-                onProcessRowUpdateError={(e) =>
-                  setError(e.response?.data?.detail || e.message)
-                }
-                sx={{ bgcolor: "background.paper", "& .MuiDataGrid-cell": { py: 0.5 } }}
-              />
+              {items.length > 0 && (
+                <DataGrid
+                  autoHeight
+                  rows={items}
+                  columns={columns}
+                  hideFooter
+                  disableRowSelectionOnClick
+                  getRowHeight={() => "auto"}
+                  processRowUpdate={processRowUpdate}
+                  onProcessRowUpdateError={(e) =>
+                    setError(e.response?.data?.detail || e.message)
+                  }
+                  sx={{ bgcolor: "background.paper", "& .MuiDataGrid-cell": { py: 0.5 } }}
+                />
+              )}
             </Stack>
           )}
         </DialogContent>

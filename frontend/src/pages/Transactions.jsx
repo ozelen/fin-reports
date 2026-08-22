@@ -296,7 +296,11 @@ export default function Transactions() {
             {p.row.receipt_id && (
               <Chip
                 size="small"
-                label={`(${p.row.item_count || 0} items)`}
+                label={
+                  p.row.receipt_kind === "invoice"
+                    ? "Invoice"
+                    : `(${p.row.item_count || 0} items)`
+                }
                 color="warning"
                 variant="outlined"
                 onClick={openReceipt}

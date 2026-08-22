@@ -24,6 +24,7 @@ import Rules from "./pages/Rules";
 import Accounts from "./pages/Accounts";
 import Clients from "./pages/Clients";
 import Documents from "./pages/Documents";
+import Bills from "./pages/Bills";
 import Invoices from "./pages/Invoices";
 import Backup from "./pages/Backup";
 import MyLayout from "./pages/my/MyLayout";
@@ -123,6 +124,7 @@ export default function App() {
         <Route path="details" element={<MyDetails />} />
         <Route path="accounts" element={<Accounts />} />
         <Route path="documents" element={<Documents />} />
+        <Route path="bills" element={<Bills />} />
       </Route>
 
       <Route path="/clients" element={<Protected><Clients /></Protected>} />

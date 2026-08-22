@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends netcat-openbsd fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends netcat-openbsd fonts-dejavu-core poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

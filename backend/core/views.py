@@ -7,7 +7,7 @@ from pathlib import Path
 from django.core import serializers as dj_serializers
 from django.core.management.color import no_style
 from django.db import connection, transaction as db_transaction
-from django.db.models import Count, IntegerField, OuterRef, Q, Subquery, Sum
+from django.db.models import CharField, Count, IntegerField, OuterRef, Q, Subquery, Sum
 from django.db.models.functions import (
     Coalesce,
     TruncDay,
@@ -32,7 +32,14 @@ from .filters import TransactionFilter
 from .folders import descendants, folder_transaction_ids, own_transaction_ids, subtree
 from . import invoicing
 from .fx import Converter, _unique, exclude_ignored, series_eur, summarize_eur
-from .receipts import ingest_statement, set_item_tags
+from .receipts import (
+    candidate_transactions,
+    ingest_statement,
+    link_receipt,
+    set_item_tags,
+    try_match_receipt,
+    window_days,
+)
 from .models import (
     Account,
     Budget,
@@ -167,6 +174,12 @@ class TransactionViewSet(
             .values("id")[:1],
             output_field=IntegerField(),
         )
+        receipt_kind = Subquery(
+            Receipt.objects.filter(transaction_id=OuterRef("pk"))
+            .order_by("id")
+            .values("kind")[:1],
+            output_field=CharField(),
+        )
         item_count = Coalesce(
             Subquery(
                 PurchaseItem.objects.filter(transaction_id=OuterRef("pk"))
@@ -184,6 +197,7 @@ class TransactionViewSet(
             .prefetch_related("tag_links__tag")
             .annotate(
                 receipt_id=receipt_id,
+                receipt_kind=receipt_kind,
                 item_count=item_count,
             )
         )
@@ -556,14 +570,25 @@ class DocumentViewSet(viewsets.ModelViewSet):
         return FileResponse(doc.file.open("rb"), as_attachment=True, filename=filename)
 
 
-class ReceiptViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+class ReceiptViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.UpdateModelMixin,
+    viewsets.GenericViewSet,
+):
     serializer_class = ReceiptSerializer
+    filterset_fields = ["kind"]
 
     def get_queryset(self):
         return (
             Receipt.objects.filter(owner=self.request.user)
+            .select_related("transaction")
             .prefetch_related("items__tags")
         )
+
+    def perform_update(self, serializer):
+        receipt = serializer.save()
+        try_match_receipt(receipt)
 
     @action(detail=True, methods=["get"])
     def download(self, request, pk=None):
@@ -572,6 +597,37 @@ class ReceiptViewSet(mixins.RetrieveModelMixin, viewsets.GenericViewSet):
             raise ValidationError({"detail": "No file on this receipt."})
         filename = receipt.original_filename or Path(receipt.file.name).name
         return FileResponse(receipt.file.open("rb"), filename=filename)
+
+    @action(detail=True, methods=["get"])
+    def matches(self, request, pk=None):
+        receipt = self.get_object()
+        hits = candidate_transactions(
+            request.user,
+            receipt.amount,
+            receipt.document_date,
+            receipt.currency,
+            limit=20,
+            days=window_days(receipt),
+        )
+        return Response(
+            TransactionSerializer(hits, many=True, context={"request": request}).data
+        )
+
+    @action(detail=True, methods=["post"])
+    def attach(self, request, pk=None):
+        receipt = self.get_object()
+        tx = Transaction.objects.filter(
+            owner=request.user, id=request.data.get("transaction")
+        ).first()
+        if tx is None:
+            raise ValidationError({"transaction": "Not found."})
+        if receipt.amount is None:
+            receipt.amount = abs(tx.amount)
+            receipt.currency = tx.currency or receipt.currency or "EUR"
+            receipt.save(update_fields=["amount", "currency"])
+        link_receipt(receipt, tx)
+        receipt = self.get_queryset().get(pk=receipt.pk)
+        return Response(self.get_serializer(receipt).data)
 
 
 class PurchaseItemViewSet(mixins.UpdateModelMixin, viewsets.GenericViewSet):

@@ -6,6 +6,7 @@ const ITEMS = [
   { label: "Details", to: "/my/details" },
   { label: "Accounts", to: "/my/accounts" },
   { label: "Documents", to: "/my/documents" },
+  { label: "Bills", to: "/my/bills" },
 ];
 
 export default function MyLayout() {

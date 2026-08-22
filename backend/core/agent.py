@@ -19,6 +19,7 @@ from .receipts import (
     parse_amount,
     reparse_receipt,
     set_item_tags,
+    window_days,
 )
 
 SYSTEM_PROMPT = """You are a personal finance assistant for Income Share, a bookkeeping app.
@@ -535,7 +536,11 @@ def _run_tool(user, name: str, args: dict) -> dict:
         if receipt is None:
             return {"error": "receipt not found"}
         hits = candidate_transactions(
-            user, receipt.amount, receipt.document_date, receipt.currency
+            user,
+            receipt.amount,
+            receipt.document_date,
+            receipt.currency,
+            days=window_days(receipt),
         )
         return {"receipt": _receipt_row(receipt), "candidates": [_tx_row(tx) for tx in hits]}
 
