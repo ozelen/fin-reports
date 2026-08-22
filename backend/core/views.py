@@ -31,7 +31,7 @@ from .export import build_workbook
 from .filters import TransactionFilter
 from .folders import descendants, folder_transaction_ids, own_transaction_ids, subtree
 from . import invoicing
-from .fx import Converter, _unique, series_eur, summarize_eur
+from .fx import Converter, _unique, exclude_ignored, series_eur, summarize_eur
 from .receipts import ingest_statement, set_item_tags
 from .models import (
     Account,
@@ -225,7 +225,7 @@ class TransactionViewSet(
     @action(detail=False, methods=["get"])
     def by_tag(self, request):
         """Aggregate the filtered transactions per tag for dashboard charts."""
-        qs = _unique(self.filter_queryset(self.get_queryset()))
+        qs = exclude_ignored(_unique(self.filter_queryset(self.get_queryset())))
         totals = summarize_eur(qs)
         currency_codes = [c["currency"] for c in totals["currencies"]]
         needs_fx = any(c.upper() != "EUR" for c in currency_codes)
@@ -359,7 +359,7 @@ class TransactionViewSet(
         ``granularity`` may be day/week/month/quarter/year.
         Non-EUR amounts are converted at the NBU rate on operation_date.
         """
-        qs = _unique(self.filter_queryset(self.get_queryset()))
+        qs = exclude_ignored(_unique(self.filter_queryset(self.get_queryset())))
         granularity = (request.query_params.get("granularity") or "month").lower()
         fx_series = series_eur(qs, granularity)
         if fx_series is not None:

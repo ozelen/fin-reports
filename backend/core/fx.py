@@ -22,6 +22,11 @@ def _unique(qs):
     return qs.model.objects.filter(pk__in=qs.order_by().values("pk"))
 
 
+def exclude_ignored(qs):
+    """Drop txs tagged to skip charts/totals (swap, cash in/out, …)."""
+    return qs.exclude(tags__ignore_stats=True)
+
+
 class Converter:
     """In-memory NBU quotes for a date/currency set. `to_eur` is identity for EUR."""
 

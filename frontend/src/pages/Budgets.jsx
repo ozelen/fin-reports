@@ -85,6 +85,7 @@ const GROUP_LABEL = {
   tax: "Tax",
   recurring: "Recurring",
   budget: "Budget",
+  unplanned: "Unplanned",
 };
 const periodLabel = (v) => PERIODS.find((p) => p.value === v)?.label || v;
 const kindLabel = (v) => KINDS.find((k) => k.value === v)?.label || v;
@@ -106,6 +107,7 @@ export default function Budgets() {
   const [chartTax, setChartTax] = useState(true);
   const [chartRecurring, setChartRecurring] = useState(true);
   const [chartBudget, setChartBudget] = useState(true);
+  const [chartUnplanned, setChartUnplanned] = useState(true);
 
   const load = async () => {
     const params = { year };
@@ -128,6 +130,18 @@ export default function Budgets() {
   const openNew = () => {
     setEditing(null);
     setForm(BLANK);
+    setOpen(true);
+  };
+
+  const openPlan = (row) => {
+    setEditing(null);
+    setForm({
+      ...BLANK,
+      tag: row.tag,
+      period: "month",
+      kind: "spend",
+      amount: Number(row.suggest_amount ?? row.actual ?? 0).toFixed(2),
+    });
     setOpen(true);
   };
 
@@ -183,9 +197,10 @@ export default function Budgets() {
       tax: chartTax,
       recurring: chartRecurring,
       budget: chartBudget,
+      unplanned: chartUnplanned,
     };
     return lines.filter((r) => on[r.group] !== false);
-  }, [lines, chartSalary, chartTax, chartRecurring, chartBudget]);
+  }, [lines, chartSalary, chartTax, chartRecurring, chartBudget, chartUnplanned]);
   const chart = useMemo(() => {
     const rows = visible.filter(
       (r) => r.is_active && ((r.amount || 0) || (r.actual || 0)),
@@ -261,16 +276,24 @@ export default function Budgets() {
       width: 130,
       type: "number",
       renderCell: (p) => {
-        const over = p.row.kind === "spend" && (p.value || 0) > (p.row.amount || 0);
+        const planned = p.row.amount || 0;
+        const over =
+          p.row.kind === "spend" && planned > 0 && (p.value || 0) > planned;
         const behind =
           (p.row.kind === "save" || p.row.kind === "income") &&
-          (p.value || 0) < (p.row.amount || 0);
+          (p.value || 0) < planned;
         return (
           <Typography
             variant="body2"
             sx={{
               fontWeight: 600,
-              color: over ? "error.main" : behind ? "warning.main" : "success.main",
+              color: over
+                ? "error.main"
+                : behind
+                  ? "warning.main"
+                  : planned
+                    ? "success.main"
+                    : "text.primary",
             }}
           >
             {currency(p.value)}
@@ -307,6 +330,18 @@ export default function Budgets() {
           params.set("date_from", p.row.period_start);
           params.set("date_to", p.row.period_end);
           if (p.row.account) params.set("account", String(p.row.account));
+        }
+        if (p.row.source === "unplanned") {
+          return (
+            <Stack direction="row" alignItems="center">
+              <Button size="small" component={RouterLink} to={`/transactions?${params}`}>
+                View
+              </Button>
+              <IconButton size="small" color="primary" onClick={() => openPlan(p.row)}>
+                <AddIcon fontSize="small" />
+              </IconButton>
+            </Stack>
+          );
         }
         return (
           <Stack direction="row" alignItems="center">
@@ -481,6 +516,16 @@ export default function Budgets() {
                 />
               }
               label="Budgets"
+            />
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  checked={chartUnplanned}
+                  onChange={(e) => setChartUnplanned(e.target.checked)}
+                />
+              }
+              label="Unplanned"
             />
           </Stack>
         </Stack>

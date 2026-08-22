@@ -5,11 +5,12 @@ import datetime as dt
 from decimal import Decimal
 
 from .criteria import cadence_factor, period_range
-from .fx import Converter, summarize_eur
-from .models import Account, Budget, Recurrence, Transaction
+from .fx import Converter, exclude_ignored, summarize_eur
+from .models import Account, Budget, Recurrence, Tag, Transaction
 from .recurrences import iter_occurrences, remaining_dates
 
 _ZERO = Decimal("0")
+_TOP_UNPLANNED = 8
 
 
 def _money(value):
@@ -334,8 +335,64 @@ def status(user, start: dt.date | None = None, end: dt.date | None = None) -> di
             eur = native if (rec.currency or "EUR").upper() == "EUR" else _ZERO
         tax_set_aside += eur
 
-    order = {"salary": 0, "tax": 1, "recurring": 2, "budget": 3}
-    lines.sort(key=lambda row: (order.get(row["group"], 9), row["name"] or ""))
+    shown_tags = {row["tag"] for row in lines if row.get("tag")}
+    factor = cadence_factor(Budget.PERIOD_MONTH, start, end) or 1
+    unplanned = []
+    tag_qs = Tag.objects.filter(
+        owner=user,
+        ignore_stats=False,
+        transactions__owner=user,
+        transactions__operation_date__gte=start,
+        transactions__operation_date__lte=end,
+        transactions__recurrence__isnull=True,
+        transactions__amount__lt=0,
+    ).distinct()
+    if shown_tags:
+        tag_qs = tag_qs.exclude(id__in=shown_tags)
+    for tag in tag_qs:
+        qs = exclude_ignored(
+            Transaction.objects.filter(
+                owner=user,
+                tags=tag,
+                recurrence__isnull=True,
+                operation_date__gte=start,
+                operation_date__lte=end,
+            )
+        )
+        summary = summarize_eur(qs)
+        actual = _actual(summary, Budget.KIND_SPEND)
+        if not actual:
+            continue
+        line = _line(
+            row_id=f"u-{tag.id}",
+            source="unplanned",
+            name=tag.name,
+            kind=Budget.KIND_SPEND,
+            period=Budget.PERIOD_MONTH,
+            amount=_ZERO,
+            actual=actual,
+            is_active=True,
+            start=start,
+            end=end,
+            count=summary.get("count") or 0,
+            tag=tag.id,
+            tag_name=tag.name,
+            tag_color=tag.color,
+            group="unplanned",
+        )
+        line["suggest_amount"] = _money(actual / factor)
+        unplanned.append(line)
+    unplanned.sort(key=lambda row: -(row["actual"] or 0))
+    lines.extend(unplanned[:_TOP_UNPLANNED])
+
+    order = {"salary": 0, "tax": 1, "recurring": 2, "budget": 3, "unplanned": 4}
+    lines.sort(
+        key=lambda row: (
+            order.get(row["group"], 9),
+            -(row["actual"] or 0) if row["group"] == "unplanned" else 0,
+            row["name"] or "",
+        )
+    )
 
     return {
         "as_of": as_of.isoformat(),

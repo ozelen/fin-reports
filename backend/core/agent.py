@@ -8,7 +8,7 @@ from django.conf import settings
 from django.db.models import Count, Q, Sum
 
 from .criteria import apply_criteria
-from .fx import summarize_eur
+from .fx import exclude_ignored, summarize_eur
 from .models import Account, Invoice, PurchaseItem, Receipt, Tag, Transaction, TransactionTag
 from .receipts import (
     candidate_transactions,
@@ -383,7 +383,7 @@ def _run_tool(user, name: str, args: dict) -> dict:
             "kind": args.get("kind") if args.get("kind") not in (None, "all") else None,
             "account": args.get("account_id"),
         }
-        qs = apply_criteria(Transaction.objects.filter(owner=user), criteria)
+        qs = exclude_ignored(apply_criteria(Transaction.objects.filter(owner=user), criteria))
         summary = summarize_eur(qs)
         native = [
             {

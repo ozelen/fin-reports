@@ -115,8 +115,8 @@ class FxRateAdmin(admin.ModelAdmin):
 
 @admin.register(Tag)
 class TagAdmin(admin.ModelAdmin):
-    list_display = ("name", "color", "owner", "created_at")
-    list_filter = ("owner",)
+    list_display = ("name", "color", "ignore_stats", "owner", "created_at")
+    list_filter = ("owner", "ignore_stats")
     search_fields = ("name",)
 
 

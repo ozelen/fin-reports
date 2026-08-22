@@ -7,9 +7,11 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControlLabel,
   IconButton,
   Paper,
   Stack,
+  Switch,
   TextField,
   Typography,
 } from "@mui/material";
@@ -18,7 +20,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import api from "../api";
 
-const BLANK = { name: "", color: "#1f4e78", description: "" };
+const BLANK = { name: "", color: "#1f4e78", description: "", ignore_stats: false };
 
 export default function Tags() {
   const [tags, setTags] = useState([]);
@@ -43,7 +45,12 @@ export default function Tags() {
 
   const openEdit = (tag) => {
     setEditing(tag);
-    setForm({ name: tag.name, color: tag.color, description: tag.description || "" });
+    setForm({
+      name: tag.name,
+      color: tag.color,
+      description: tag.description || "",
+      ignore_stats: !!tag.ignore_stats,
+    });
     setOpen(true);
   };
 
@@ -78,6 +85,9 @@ export default function Tags() {
             <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
               {t.description}
             </Typography>
+            {t.ignore_stats && (
+              <Chip size="small" variant="outlined" label="Hidden from stats" />
+            )}
             <Chip size="small" variant="outlined" label={`${t.transaction_count} tx`} />
             <IconButton size="small" onClick={() => openEdit(t)}>
               <EditIcon fontSize="small" />
@@ -121,6 +131,17 @@ export default function Tags() {
               multiline
               minRows={2}
               fullWidth
+            />
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={form.ignore_stats}
+                  onChange={(e) =>
+                    setForm({ ...form, ignore_stats: e.target.checked })
+                  }
+                />
+              }
+              label="Hide from stats"
             />
           </Stack>
         </DialogContent>

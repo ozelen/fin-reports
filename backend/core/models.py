@@ -113,6 +113,10 @@ class Tag(models.Model):
     name = models.CharField(max_length=80)
     color = models.CharField(max_length=9, default="#1f4e78")
     description = models.TextField(blank=True)
+    ignore_stats = models.BooleanField(
+        default=False,
+        help_text="Hide this tag from dashboard, budgets, and other totals (swap, cash in/out).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

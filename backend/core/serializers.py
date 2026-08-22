@@ -314,7 +314,15 @@ class TagSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Tag
-        fields = ["id", "name", "color", "description", "transaction_count", "created_at"]
+        fields = [
+            "id",
+            "name",
+            "color",
+            "description",
+            "ignore_stats",
+            "transaction_count",
+            "created_at",
+        ]
         read_only_fields = ["id", "transaction_count", "created_at"]
 
 
