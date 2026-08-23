@@ -4,9 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Existing image tag to deploy (git SHA). Skips build.
+        required: true
+        type: string
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -58,11 +65,22 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/income-share-web:latest
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
-      - name: Trigger Jenkins deploy
-        env:
-          JENKINS_DEPLOY_URL: ${{ secrets.JENKINS_DEPLOY_URL }}
-          JENKINS_USER: ${{ secrets.JENKINS_USER }}
-          JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
+
+  deploy:
+    needs: [build]
+    if: |
+      always() && (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success') ||
+        (github.event_name == 'workflow_dispatch')
+      )
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
+      JENKINS_DEPLOY_URL: ${{ secrets.JENKINS_DEPLOY_URL }}
+      JENKINS_USER: ${{ secrets.JENKINS_USER }}
+      JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
+    steps:
+      - name: Trigger Jenkins
         run: |
           set -eu
           if [ -z "${JENKINS_USER:-}" ] || [ -z "${JENKINS_TOKEN:-}" ]; then
@@ -73,11 +91,12 @@ jobs:
             echo "JENKINS_DEPLOY_URL secret is required."
             exit 1
           fi
+          echo "Deploying IMAGE_TAG=${IMAGE_TAG}"
           base="${JENKINS_DEPLOY_URL%%/job/*}"
           crumb_json=$(curl -fsS -u "$JENKINS_USER:$JENKINS_TOKEN" "$base/crumbIssuer/api/json")
           field=$(echo "$crumb_json" | jq -r '.crumbRequestField')
           crumb=$(echo "$crumb_json" | jq -r '.crumb')
           curl -fsS -X POST -u "$JENKINS_USER:$JENKINS_TOKEN" \
             -H "$field: $crumb" \
-            --data-urlencode "IMAGE_TAG=${GITHUB_SHA}" \
+            --data-urlencode "IMAGE_TAG=${IMAGE_TAG}" \
             "$JENKINS_DEPLOY_URL"
