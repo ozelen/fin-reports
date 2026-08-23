@@ -14,7 +14,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN chmod +x entrypoint.sh
+# ponytail: 777 so TrueNAS non-root (e.g. uid 568) can write; collectstatic at build so runtime need not create the tree
+RUN mkdir -p /app/staticfiles /app/media \
+    && chmod 777 /app/staticfiles /app/media \
+    && chmod +x entrypoint.sh \
+    && DJANGO_DB_ENGINE=sqlite DJANGO_SECRET_KEY=build python manage.py collectstatic --noinput
 
 EXPOSE 8000
 

@@ -66,6 +66,7 @@ services:
     volumes:
       - ./backups:/backups
       - ./scripts/backup.sh:/backup.sh:ro
+      - ./scripts/restore.sh:/restore.sh:ro
     depends_on:
       db:
         condition: service_healthy

@@ -1,0 +1,51 @@
+# Production on TrueNAS (AMD64). Uses Hub images and the NAS Postgres instance.
+# Local dev stays on docker-compose.yml (builds from source + Compose Postgres).
+services:
+  api:
+    image: ${DOCKERHUB_USER:-zelenuk}/income-share-api:${IMAGE_TAG:-latest}
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - media:/app/media
+
+  bot:
+    image: ${DOCKERHUB_USER:-zelenuk}/income-share-api:${IMAGE_TAG:-latest}
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - media:/app/media
+    command: python manage.py run_telegram_bot
+
+  web:
+    image: ${DOCKERHUB_USER:-zelenuk}/income-share-web:${IMAGE_TAG:-latest}
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      API_HOST: ${API_HOST:-api}
+      API_PORT: ${API_PORT:-8000}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      - api
+
+  backup:
+    image: postgres:16-alpine
+    platform: linux/amd64
+    restart: unless-stopped
+    user: "0:0"
+    env_file: .env
+    environment:
+      BACKUP_DIR: /backups
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+      - ./scripts/restore.sh:/restore.sh:ro
+    entrypoint: ["/bin/sh", "/backup.sh"]
+    command: ["--loop"]
+
+volumes:
+  media:

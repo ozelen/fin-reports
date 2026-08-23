@@ -79,19 +79,74 @@ docker compose run --rm --entrypoint /bin/sh backup /backup.sh
 
 # restore (stops writers first; replaces the current database)
 docker compose stop api bot
-docker compose exec -T db pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-  --clean --if-exists --no-owner < backups/income-share-YYYYMMDDThhmmssZ.dump
+docker compose run --rm --entrypoint /bin/sh backup \
+  /restore.sh /backups/income-share-YYYYMMDDThhmmssZ.dump
 docker compose start api bot
 ```
+
+Same dump/restore against TrueNAS Postgres: use `-f docker-compose.prod.yml` (that
+file has no `db` service; `POSTGRES_HOST` is the NAS). Move data either way with a
+`.dump` file in `./backups/`.
 
 `BACKUP_INTERVAL_SECONDS` and `BACKUP_KEEP_DAYS` are in `.env`. The in-app Backup
 page is a JSON export of your data, not a full database dump. Media files
 (receipts, documents) live on the `media` volume and are not included.
 
+## Production (TrueNAS)
+
+Local Compose still builds from source and runs its own Postgres. Production
+pulls images from Docker Hub and uses the existing TrueNAS Postgres 16 app
+(one extra database on that instance — not a second Postgres). Redis/RabbitMQ
+are unused.
+
+**GitHub secrets:** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `JENKINS_DEPLOY_URL`.
+Optional HTTP auth: `JENKINS_USER`, `JENKINS_TOKEN`. Keep Hub images private.
+
+**Jenkins:** One Generic Webhook Trigger job (`income-share`) that runs the
+root `Jenkinsfile`. Map JSONPath `$.IMAGE_TAG` to the `IMAGE_TAG` parameter.
+The job `kubectl set image`s both SCALE apps (`ix-income-share-api`,
+`ix-income-share-web`) to `zelenuk/income-share-*:$IMAGE_TAG`. GitHub Actions
+POSTs `{"IMAGE_TAG":"<sha>"}` after both images are pushed. Jenkins must be
+reachable from GitHub (reverse proxy, Cloudflare tunnel, or Tailscale Funnel).
+The executor needs passwordless `sudo k3s kubectl` on the NAS host.
+
+One-time on the NAS:
+
+1. Create the database (psql on the TrueNAS Postgres app):
+
+   ```sql
+   CREATE USER income WITH PASSWORD '...';
+   CREATE DATABASE income OWNER income;
+   ```
+
+   Allow connections from the Docker/apps network (`pg_hba.conf`).
+
+2. Copy `.env` from `.env.example`. Set `POSTGRES_HOST`/`POSTGRES_PORT` to the
+   LAN IP/port you already use with `psql`, `DOCKERHUB_USER`,
+   `DJANGO_ALLOWED_HOSTS`, and `CSRF_TRUSTED_ORIGINS` (HTTPS origin, e.g.
+   `https://income.example.com`). Images are `linux/amd64` (TrueNAS / Ryzen).
+
+3. Dump local and restore onto TrueNAS (source of truth after this):
+
+   ```bash
+   docker compose exec -T db pg_dump -U "$POSTGRES_USER" -Fc -d "$POSTGRES_DB" \
+     > backups/migrate.dump
+   docker compose -f docker-compose.prod.yml stop api bot
+   docker compose -f docker-compose.prod.yml run --rm --entrypoint /bin/sh backup \
+     /restore.sh /backups/migrate.dump
+   ```
+
+4. `docker compose -f docker-compose.prod.yml up -d`
+
+After that, `git push` to `main` tests, pushes `income-share-api` /
+`income-share-web` (`<sha>` and `latest`), and Jenkins pins those SHA tags
+on the SCALE deployments.
+
 ## Architecture
 
 ```
-web (React/MUI, nginx)  ──/api──▶  api (Django/DRF, gunicorn)  ──▶  db (Postgres)
+web (React/MUI, nginx)  ──/api──▶  api (Django/DRF, gunicorn)  ──▶  Postgres
+                         (local: Compose db · prod: TrueNAS Postgres 16)
 bot (Telegram long-poll)  ──▶  db + media, Gemini, api.telegram.org
 ```
 

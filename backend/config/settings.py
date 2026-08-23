@@ -16,6 +16,11 @@ ALLOWED_HOSTS = [
     for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if h.strip()
 ]
+CSRF_TRUSTED_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CSRF_TRUSTED_ORIGINS", "").split(",")
+    if o.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -77,8 +82,12 @@ else:
             "NAME": os.environ.get("POSTGRES_DB", "income"),
             "USER": os.environ.get("POSTGRES_USER", "income"),
             "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "income"),
-            "HOST": os.environ.get("DB_HOST", "db"),
-            "PORT": os.environ.get("DB_PORT", "5432"),
+            "HOST": (os.environ.get("DB_HOST") or "").strip()
+            or (os.environ.get("POSTGRES_HOST") or "").strip()
+            or "db",
+            "PORT": (os.environ.get("DB_PORT") or "").strip()
+            or (os.environ.get("POSTGRES_PORT") or "").strip()
+            or "5432",
         }
     }
 
