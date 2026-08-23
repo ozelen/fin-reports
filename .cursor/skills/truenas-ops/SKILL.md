@@ -21,13 +21,13 @@ Do not read `.env` or dump secrets. Never write passwords, Hub PATs, or the Post
 
 - `sudo docker ps`
 - `sudo k3s kubectl get pods -A | grep income`
-- namespaces: `ix-income-share-api`, `ix-income-share-web`
+- namespaces: `ix-income-share-api` (SPA + API in one image). Old `ix-income-share-web` can be stopped/deleted.
 - logs: `sudo k3s kubectl -n ix-income-share-api logs deploy/income-share-api-ix-chart --tail=50` (verify actual deploy/pod names if needed)
 
 ## App facts
 
-- API image: zelenuk/income-share-api (linux/amd64). Published host port last used: 18022 → container 8000. Admin: http://192.168.1.185:18022/admin/
-- Web image: zelenuk/income-share-web (linux/amd64). Nginx needs API_HOST=192.168.1.185 and API_PORT=18022 when not on a Compose network named `api`. Web was CrashLoopBackOff (hostname `api` not found).
+- API image: zelenuk/income-share-api (linux/amd64) includes the Vite SPA. Published host port last used: 18022 → container 8000. App: http://192.168.1.185:18022/  Admin: http://192.168.1.185:18022/admin/
+- Point `https://fin.zelen.uk` at the API service. No separate web image; no `API_HOST`.
 - Postgres is the existing TrueNAS Postgres 16 app: POSTGRES_HOST=192.168.1.185 POSTGRES_PORT=15432 POSTGRES_DB=income POSTGRES_USER=income (password is on the NAS, never write it into the skill).
 - Django: DJANGO_ALLOWED_HOSTS=192.168.1.185,fin.zelen.uk and CSRF_TRUSTED_ORIGINS=http://192.168.1.185:18022,https://fin.zelen.uk
 - Volumes on API: host /mnt/lake/finance/staticfiles → /app/staticfiles ; host /mnt/lake/finance/media → /app/media (NOT /apps/media). Bot must share /app/media.
@@ -46,7 +46,7 @@ Do not read `.env` or dump secrets. Never write passwords, Hub PATs, or the Post
 
 ## Jenkins webhook (one job, both siblings)
 
-GHA already POSTs `{"IMAGE_TAG":"<sha>"}` to `JENKINS_DEPLOY_URL` after both Hub images are pushed on `main`. One Jenkins job redeploys API and web (and bot if `ix-income-share-bot` exists).
+GHA POSTs `IMAGE_TAG` to Jenkins after pushing `zelenuk/income-share-api`. Job redeploys API (and bot if `ix-income-share-bot` exists). Do not redeploy `ix-income-share-web`.
 
 **Job:** Pipeline from SCM, name `income-share` (or `income-share-deploy`). Root `Jenkinsfile`.
 
@@ -71,9 +71,9 @@ Optional: `JENKINS_USER` + `JENKINS_TOKEN` if the endpoint is auth-gated.
 
 Jenkins UI check: **Manage Jenkins → Credentials → System → Global credentials (unrestricted)** — an entry with **ID `ozelen`**, kind SSH Username with private key, username `ozelen`. If the ID is anything else, rename it to `ozelen` (or the job will fail to bind).
 
-**What the job does:** `withCredentials([sshUserPrivateKey(...)])` then `ssh -i $SSH_KEY -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new` to the NAS. Finds deploys in `ix-income-share-api` / `ix-income-share-web` (skip missing bot ns), `set image` to `zelenuk/income-share-*:$IMAGE_TAG` (container is `ix-chart`), then `rollout status` (180s). No Docker Hub login — cluster pull secret already pulls `zelenuk/*`. Never store the private key in the repo.
+**What the job does:** SSH to the NAS, `set image` API (skip missing bot ns) to `zelenuk/income-share-api:$IMAGE_TAG`, then `rollout status` (180s).
 
 Known deploys (SCALE ix-charts, verified):
 - `ix-income-share-api` / `income-share-api-ix-chart` / container `ix-chart`
-- `ix-income-share-web` / `income-share-web-ix-chart` / container `ix-chart`
 - no `ix-income-share-bot` yet
+- `ix-income-share-web` is leftover nginx — stop/delete after the combined image is live

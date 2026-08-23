@@ -102,13 +102,10 @@ are unused.
 **GitHub secrets:** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`, `JENKINS_DEPLOY_URL`.
 Optional HTTP auth: `JENKINS_USER`, `JENKINS_TOKEN`. Keep Hub images private.
 
-**Jenkins:** One Generic Webhook Trigger job (`income-share`) that runs the
-root `Jenkinsfile`. Map JSONPath `$.IMAGE_TAG` to the `IMAGE_TAG` parameter.
-The job `kubectl set image`s both SCALE apps (`ix-income-share-api`,
-`ix-income-share-web`) to `zelenuk/income-share-*:$IMAGE_TAG`. GitHub Actions
-POSTs `{"IMAGE_TAG":"<sha>"}` after both images are pushed. Jenkins must be
-reachable from GitHub (reverse proxy, Cloudflare tunnel, or Tailscale Funnel).
-The executor needs passwordless `sudo k3s kubectl` on the NAS host.
+**Jenkins:** Pipeline job `income-share` runs the root `Jenkinsfile` and
+`kubectl set image`s `ix-income-share-api` to `zelenuk/income-share-api:$IMAGE_TAG`.
+GitHub Actions builds that one image (SPA baked in) then POSTs `IMAGE_TAG` to
+Jenkins. Public Jenkins URL: `https://jenkins.zelen.uk`.
 
 One-time on the NAS:
 
@@ -138,20 +135,21 @@ One-time on the NAS:
 
 4. `docker compose -f docker-compose.prod.yml up -d`
 
-After that, `git push` to `main` tests, pushes `income-share-api` /
-`income-share-web` (`<sha>` and `latest`), and Jenkins pins those SHA tags
-on the SCALE deployments.
+After that, `git push` to `main` tests, pushes `income-share-api` (`<sha>` and
+`latest`, SPA included), and Jenkins pins that tag on the API SCALE app.
+Stop/delete the old `income-share-web` app; point `https://fin.zelen.uk` at
+the API port.
 
 ## Architecture
 
 ```
-web (React/MUI, nginx)  ──/api──▶  api (Django/DRF, gunicorn)  ──▶  Postgres
-                         (local: Compose db · prod: TrueNAS Postgres 16)
+api (React SPA + Django/DRF, gunicorn)  ──▶  Postgres
+     (local: Compose db · prod: TrueNAS Postgres 16)
 bot (Telegram long-poll)  ──▶  db + media, Gemini, api.telegram.org
 ```
 
-- `web` serves the built SPA and reverse-proxies `/api`, `/admin`, `/static`,
-  `/media` to the `api` service — so everything is one origin.
+- One image: Vite `frontend/` is built in Docker and served by gunicorn with
+  `/api`, `/admin`, `/static`, `/media`. Local Vite (`npm run dev`) is unchanged.
 - `api` runs migrations, collects static, and seeds the superuser on boot
   (see `backend/entrypoint.sh`).
 - `bot` long-polls Telegram (no public webhook). Needs `TELEGRAM_BOT_TOKEN` and

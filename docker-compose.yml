@@ -15,7 +15,7 @@ services:
       retries: 10
 
   api:
-    build: ./backend
+    build: .
     restart: unless-stopped
     env_file: .env
     environment:
@@ -23,12 +23,14 @@ services:
       DB_PORT: 5432
     volumes:
       - media:/app/media
+    ports:
+      - "${WEB_PORT:-8080}:8000"
     depends_on:
       db:
         condition: service_healthy
 
   bot:
-    build: ./backend
+    build: .
     restart: unless-stopped
     env_file: .env
     environment:
@@ -40,14 +42,6 @@ services:
       db:
         condition: service_healthy
     command: python manage.py run_telegram_bot
-
-  web:
-    build: ./frontend
-    restart: unless-stopped
-    ports:
-      - "${WEB_PORT:-8080}:80"
-    depends_on:
-      - api
 
   backup:
     image: postgres:16-alpine

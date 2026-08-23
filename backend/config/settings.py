@@ -109,6 +109,9 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+# Vite `dist` copied into the image. Empty/missing locally (runserver + Vite).
+FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR", BASE_DIR / "frontend_dist"))
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {

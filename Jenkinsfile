@@ -43,7 +43,6 @@ pipeline {
             }
 
             redeploy ix-income-share-api zelenuk/income-share-api
-            redeploy ix-income-share-web zelenuk/income-share-web
             redeploy ix-income-share-bot zelenuk/income-share-bot
 REMOTE
           '''

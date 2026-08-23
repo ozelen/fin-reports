@@ -1,0 +1,14 @@
+.git
+.github
+**/.venv
+**/__pycache__
+**/*.pyc
+**/node_modules
+frontend/dist
+backend/media
+backend/staticfiles
+backend/db.sqlite3
+backups
+.env
+.cursor
+*.md

@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 // During `vite dev`, proxy API calls to the Django dev server so the SPA and
-// API share an origin. In production the nginx container does this instead.
+// API share an origin. Production: the API image serves `frontend/dist`.
 export default defineConfig({
   plugins: [react()],
   server: {

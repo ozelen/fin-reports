@@ -46,7 +46,8 @@ jobs:
       - name: Build and push api
         uses: docker/build-push-action@v6
         with:
-          context: ./backend
+          context: .
+          file: Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
@@ -54,17 +55,6 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/income-share-api:latest
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
-      - name: Build and push web
-        uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/income-share-web:${{ github.sha }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/income-share-web:latest
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web
 
   deploy:
     needs: [build]
