@@ -65,11 +65,19 @@ jobs:
           JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
         run: |
           set -eu
-          auth=()
-          if [ -n "${JENKINS_USER:-}" ] && [ -n "${JENKINS_TOKEN:-}" ]; then
-            auth=(-u "$JENKINS_USER:$JENKINS_TOKEN")
+          if [ -z "${JENKINS_USER:-}" ] || [ -z "${JENKINS_TOKEN:-}" ]; then
+            echo "JENKINS_USER and JENKINS_TOKEN secrets are required (Jenkins user API token, not the job token)."
+            exit 1
           fi
-          curl -fsS -X POST "${auth[@]}" \
-            -H "Content-Type: application/json" \
-            --data "{\"IMAGE_TAG\":\"${GITHUB_SHA}\"}" \
+          if [ -z "${JENKINS_DEPLOY_URL:-}" ]; then
+            echo "JENKINS_DEPLOY_URL secret is required."
+            exit 1
+          fi
+          base="${JENKINS_DEPLOY_URL%%/job/*}"
+          crumb_json=$(curl -fsS -u "$JENKINS_USER:$JENKINS_TOKEN" "$base/crumbIssuer/api/json")
+          field=$(echo "$crumb_json" | jq -r '.crumbRequestField')
+          crumb=$(echo "$crumb_json" | jq -r '.crumb')
+          curl -fsS -X POST -u "$JENKINS_USER:$JENKINS_TOKEN" \
+            -H "$field: $crumb" \
+            --data-urlencode "IMAGE_TAG=${GITHUB_SHA}" \
             "$JENKINS_DEPLOY_URL"
