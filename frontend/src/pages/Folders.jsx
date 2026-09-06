@@ -29,11 +29,7 @@ import { DataGrid } from "@mui/x-data-grid";
 import api from "../api";
 import CriteriaFields from "../components/CriteriaFields";
 import TagMultiSelect from "../components/TagMultiSelect";
-
-const currency = (v, code) =>
-  v == null
-    ? ""
-    : new Intl.NumberFormat("es-ES", { style: "currency", currency: code || "EUR" }).format(v);
+import { money as currency } from "../money";
 
 const BLANK = { name: "", parent: null, tags: [], tag_match: "any", criteria: {} };
 

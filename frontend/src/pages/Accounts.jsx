@@ -24,6 +24,7 @@ import EditIcon from "@mui/icons-material/Edit";
 import PeopleAltIcon from "@mui/icons-material/PeopleAlt";
 import SwapHorizIcon from "@mui/icons-material/SwapHoriz";
 import api from "../api";
+import { money } from "../money";
 
 const BLANK = {
   name: "",
@@ -59,12 +60,6 @@ const KIND_LABELS = {
 };
 
 const todayIso = () => new Date().toISOString().slice(0, 10);
-
-const money = (v, code) =>
-  new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: code || "EUR",
-  }).format(v || 0);
 
 function KindIcon({ kind }) {
   if (kind === "cash") return <AccountBalanceWalletIcon color="action" />;

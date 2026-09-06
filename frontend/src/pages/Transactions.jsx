@@ -31,12 +31,7 @@ import TagMultiSelect from "../components/TagMultiSelect";
 import { TagCell, TagEditorPopover } from "../components/TagCell";
 import ReceiptDialog from "../components/ReceiptDialog";
 import RecurrenceDialog from "../components/RecurrenceDialog";
-
-const currency = (v, code) =>
-  new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: code || "EUR",
-  }).format(v);
+import { money as currency } from "../money";
 
 const QUARTERS = [
   { value: "", label: "Any quarter" },

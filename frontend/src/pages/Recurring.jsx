@@ -26,11 +26,7 @@ import { DataGrid } from "@mui/x-data-grid";
 import api from "../api";
 import RecurrenceDialog, { CATS, FREQS, WEEKDAYS } from "../components/RecurrenceDialog";
 
-const currency = (v, code = "EUR") =>
-  new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: code || "EUR",
-  }).format(v || 0);
+import { money as currency } from "../money";
 
 const STATUS_COLOR = {
   paid: "success",

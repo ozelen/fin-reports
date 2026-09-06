@@ -23,6 +23,7 @@ import LockIcon from "@mui/icons-material/Lock";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { Link as RouterLink, useOutletContext, useParams } from "react-router-dom";
 import api from "../api";
+import { money } from "../money";
 
 const MONTHS = [
   [1, "January"],
@@ -58,14 +59,6 @@ const blankInvoice = () => {
     notes: "",
   };
 };
-
-function money(n, currency = "EUR") {
-  if (n == null || n === "") return "—";
-  return `${Number(n).toLocaleString("es-ES", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })} ${currency}`;
-}
 
 export default function Invoices() {
   const { clientId } = useParams();

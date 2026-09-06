@@ -14,14 +14,7 @@ import {
 import { DataGrid } from "@mui/x-data-grid";
 import api from "../api";
 import { TagCell, TagEditorPopover } from "./TagCell";
-
-const money = (v, code) =>
-  v == null
-    ? "—"
-    : new Intl.NumberFormat("es-ES", {
-        style: "currency",
-        currency: code || "EUR",
-      }).format(v);
+import { money } from "../money";
 
 const KNOWN = ["time", "location", "payment_method", "card_last4"];
 

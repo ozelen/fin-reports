@@ -346,6 +346,12 @@ def ingest_statement(user, upload, account, result: dict) -> dict:
 
     meta = result["meta"]
     rows = result["rows"]
+    account_ccy = (getattr(account, "currency", None) or "").upper()
+    for row in rows:
+        if row.pop("_currency_explicit", False):
+            continue
+        if account_ccy:
+            row["currency"] = account_ccy
     upload.account = account
     upload.account_name = meta.get("account_name", "")
     upload.account_iban = meta.get("account_iban", "")

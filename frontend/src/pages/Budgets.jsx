@@ -26,11 +26,7 @@ import { BarChart } from "@mui/x-charts/BarChart";
 import api from "../api";
 import RecurrenceDialog from "../components/RecurrenceDialog";
 
-const currency = (v, code = "EUR") =>
-  new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: code || "EUR",
-  }).format(v || 0);
+import { money as currency } from "../money";
 
 const PERIODS = [
   { value: "week", label: "Weekly" },

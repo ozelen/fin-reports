@@ -3,14 +3,7 @@ import { Alert, Box, Chip, Paper, Stack, Typography } from "@mui/material";
 import ReceiptLongIcon from "@mui/icons-material/ReceiptLong";
 import api from "../api";
 import ReceiptDialog from "../components/ReceiptDialog";
-
-const money = (v, code) =>
-  v == null
-    ? "—"
-    : new Intl.NumberFormat("es-ES", {
-        style: "currency",
-        currency: code || "EUR",
-      }).format(v);
+import { money } from "../money";
 
 const STATUS = {
   paid: { color: "success", label: "Paid" },

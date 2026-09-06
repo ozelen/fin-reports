@@ -12,12 +12,7 @@ import { PieChart } from "@mui/x-charts/PieChart";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { LineChart } from "@mui/x-charts/LineChart";
 import api from "../api";
-
-const currency = (v, code = "EUR") =>
-  new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: code || "EUR",
-  }).format(v || 0);
+import { money as currency } from "../money";
 
 const QUARTERS = [
   { value: "", label: "All time" },

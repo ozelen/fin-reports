@@ -330,16 +330,18 @@ def _map_columns(header: list[str]) -> dict:
     return cols
 
 
+def _currency_codes(text: str):
+    """Codes in a header like 'Card currency amount, (UAH)' — not data rows."""
+    for token in re.findall(r"[A-Za-z]{3}", text or ""):
+        code = token.upper()
+        if code in CURRENCIES:
+            yield code
+
+
 def _detect_currency(matrix: list[list], header: list[str]) -> str:
     for cell in header:
-        for token in _cell_str(cell).upper().split():
-            if token in CURRENCIES:
-                return token
-    for row in matrix:
-        for cell in row:
-            for token in _cell_str(cell).upper().replace(",", " ").split():
-                if token in CURRENCIES:
-                    return token
+        for code in _currency_codes(_cell_str(cell)):
+            return code
     return "EUR"
 
 
@@ -571,7 +573,8 @@ def parse(path: str, filename: str) -> dict:
         if tx_type:
             extras["type"] = tx_type
         row_cur = _cell_str(col("currency")).upper()
-        currency = row_cur if row_cur in CURRENCIES else meta["currency"]
+        currency_explicit = row_cur in CURRENCIES
+        currency = row_cur if currency_explicit else meta["currency"]
         mcc = _cell_str(col("mcc"))
         if mcc and mcc not in ("—", "-"):
             extras["mcc"] = mcc
@@ -607,6 +610,7 @@ def parse(path: str, filename: str) -> dict:
                 "balance": balance,
                 "currency": currency,
                 "metadata": extras,
+                "_currency_explicit": currency_explicit,
                 "dedupe_hash": dedupe_hash(op_date, amount, concept, balance),
             }
         )

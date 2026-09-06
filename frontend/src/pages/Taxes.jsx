@@ -26,11 +26,7 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import api from "../api";
 import TagMultiSelect from "../components/TagMultiSelect";
 
-const currency = (v, code = "EUR") =>
-  new Intl.NumberFormat("es-ES", {
-    style: "currency",
-    currency: code || "EUR",
-  }).format(v || 0);
+import { money as currency } from "../money";
 
 const CURRENT_YEAR = new Date().getFullYear();
 const YEARS = Array.from({ length: 6 }, (_, i) => CURRENT_YEAR - 2 + i);
