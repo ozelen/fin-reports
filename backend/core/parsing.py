@@ -405,7 +405,7 @@ def _extract_meta(matrix: list[list], header_row: int, header: list[str]) -> dic
 
 
 def dedupe_hash(operation_date, amount, concept, balance) -> str:
-    key = f"{operation_date}|{amount}|{concept}|{balance}"
+    key = f"{operation_date}|{amount}|{(concept or '').strip().casefold()}|{balance}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
