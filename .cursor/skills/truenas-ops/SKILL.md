@@ -28,9 +28,11 @@ Do not read `.env` or dump secrets. Never write passwords, Hub PATs, or the Post
 
 - API image: zelenuk/income-share-api (linux/amd64) includes the Vite SPA. Published host port last used: 18022 → container 8000. App: http://192.168.1.185:18022/  Admin: http://192.168.1.185:18022/admin/
 - Point `https://fin.zelen.uk` at the API service. No separate web image; no `API_HOST`.
-- Postgres is the existing TrueNAS Postgres 16 app: POSTGRES_HOST=192.168.1.185 POSTGRES_PORT=15432 POSTGRES_DB=income POSTGRES_USER=income (password is on the NAS, never write it into the skill).
+- Postgres is the existing TrueNAS Postgres 16 app (`ix-postgres16`): POSTGRES_HOST=192.168.1.185 POSTGRES_PORT=15432 POSTGRES_DB=income POSTGRES_USER=income (password is on the NAS, never write it into the skill). Live data is `lake/databases/pg16` — do not write dumps there.
+- DB dumps: `pg_dump -Fc` of `income` into `lake/finance/backups` (`/mnt/lake/finance/backups/income-share-*.dump`, owner `apps:apps`). Jenkins job `income-share-backup` / `Jenkinsfile.backup`, cron `H 3 * * *`, same SSH credential `ozelen` (writes via sudo). Keep 14 days. Restore: scale API/bot to 0, `kubectl -n ix-postgres16 exec -i deploy/postgres16-ix-chart -- pg_restore --clean --if-exists --no-owner -U postgres -d income < dump`.
 - Django: DJANGO_ALLOWED_HOSTS=192.168.1.185,fin.zelen.uk and CSRF_TRUSTED_ORIGINS=http://192.168.1.185:18022,https://fin.zelen.uk
-- Volumes on API: host /mnt/lake/finance/staticfiles → /app/staticfiles ; host /mnt/lake/finance/media → /app/media (NOT /apps/media). Bot must share /app/media.
+- Volumes on API: host /mnt/lake/finance/staticfiles → /app/staticfiles ; host /mnt/lake/finance/media → /app/media (NOT /apps/media).
+- Bot: same image `zelenuk/income-share-api`, command `python manage.py run_telegram_bot`, no published port, same Postgres env + `/app/media`. Needs `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `GEMINI_API_KEY`. TrueNAS app name `income-share-bot` → ns `ix-income-share-bot`. Do not run the bot inside the API container (two long-running processes).
 
 ## Images / pull
 

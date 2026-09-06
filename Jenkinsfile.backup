@@ -1,0 +1,44 @@
+// Scheduled logical dump of the `income` database on TrueNAS Postgres 16.
+// Writes /mnt/lake/finance/backups/income-share-YYYYMMDDThhmmssZ.dump
+//
+// Jenkins job: Pipeline from SCM, name `income-share-backup`, script path
+// `Jenkinsfile.backup`. Same SSH credential ID `ozelen` as the deploy job.
+// Build Triggers → Build periodically → `H 3 * * *` (once a night).
+// Do not dump into lake/databases/pg16 — that is the live cluster.
+pipeline {
+  agent any
+  parameters {
+    string(name: 'KEEP_DAYS', defaultValue: '14', description: 'Delete dumps older than this many days')
+  }
+  stages {
+    stage('Dump') {
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'ozelen', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          sh '''
+            set -eu
+            KEEP="${KEEP_DAYS:-14}"
+            ssh -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+              "${SSH_USER}@192.168.1.185" "bash -s -- ${KEEP}" <<'REMOTE'
+            set -eu
+            KEEP="${1:?KEEP_DAYS required}"
+            DEST=/mnt/lake/finance/backups
+            if [ ! -d "$DEST" ]; then
+              sudo zfs create lake/finance/backups
+            fi
+            sudo chown apps:apps "$DEST"
+            stamp=$(date -u +%Y%m%dT%H%M%SZ)
+            tmp=$(mktemp)
+            trap 'rm -f "$tmp"' EXIT
+            sudo k3s kubectl -n ix-postgres16 exec deploy/postgres16-ix-chart -- \
+              pg_dump -U postgres -Fc income > "$tmp"
+            sudo install -o apps -g apps -m 640 "$tmp" "$DEST/income-share-$stamp.dump"
+            sudo find "$DEST" -name 'income-share-*.dump' -type f -mtime +"$KEEP" -delete
+            ls -lh "$DEST/income-share-$stamp.dump"
+            echo "kept $(sudo find "$DEST" -name 'income-share-*.dump' -type f | wc -l | tr -d " ") dumps (${KEEP}d)"
+REMOTE
+          '''
+        }
+      }
+    }
+  }
+}
