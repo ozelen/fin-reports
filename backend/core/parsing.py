@@ -404,8 +404,14 @@ def _extract_meta(matrix: list[list], header_row: int, header: list[str]) -> dic
     return meta
 
 
+def _hash_money(value) -> str:
+    if value is None:
+        return "None"
+    return f"{Decimal(value).quantize(Decimal('0.01'))}"
+
+
 def dedupe_hash(operation_date, amount, concept, balance) -> str:
-    key = f"{operation_date}|{amount}|{(concept or '').strip().casefold()}|{balance}"
+    key = f"{operation_date}|{_hash_money(amount)}|{(concept or '').strip().casefold()}|{_hash_money(balance)}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
