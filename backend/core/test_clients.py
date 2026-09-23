@@ -58,28 +58,26 @@ class ContractWindowTests(TestCase):
 
 
 class ClientActiveTests(DjangoTestCase):
-    def test_contract_beats_engagement_window(self):
+    def test_follows_client_window_not_document_dates(self):
         user = get_user_model().objects.create_user("t", password="x")
         client = Client.objects.create(
             owner=user,
-            name="Guruflow Team Ltd",
-            active_from=date(2026, 1, 1),
+            name="Quarrymare Limited",
+            active_from=date(2026, 9, 21),
             active_to=None,
         )
-        self.assertTrue(client.is_active(date(2026, 9, 6)))
         Document.objects.create(
             owner=user,
             client=client,
             kind=Document.KIND_AGREEMENT,
-            title="Pin-Up",
-            document_date=date(2024, 10, 1),
-            starts_on=date(2024, 10, 1),
-            ends_on=date(2025, 5, 31),
-            file=ContentFile(b"%PDF", name="pinup.pdf"),
+            title="Autodesk",
+            starts_on=date(2026, 9, 21),
+            ends_on=date(2026, 3, 20),
+            file=ContentFile(b"%PDF", name="contract.pdf"),
         )
-        client = Client.objects.prefetch_related("documents").get(pk=client.pk)
-        self.assertFalse(client.is_active(date(2026, 9, 6)))
-        self.assertTrue(client.is_active(date(2025, 3, 1)))
+        self.assertTrue(client.is_active(date(2026, 9, 23)))
+        client.active_to = date(2026, 9, 22)
+        self.assertFalse(client.is_active(date(2026, 9, 23)))
 
 
 class DocumentUploadTests(DjangoTestCase):

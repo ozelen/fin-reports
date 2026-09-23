@@ -207,17 +207,25 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         kind = attrs.get("kind", getattr(self.instance, "kind", None))
-        if kind != Document.KIND_AGREEMENT:
-            return attrs
-        current = attrs.get(
-            "starts_on",
-            getattr(self.instance, "starts_on", None) if self.instance else None,
-        )
-        if current:
-            return attrs
-        attrs["starts_on"] = attrs.get("document_date") or getattr(
-            self.instance, "document_date", None
-        )
+        if kind == Document.KIND_AGREEMENT:
+            current = attrs.get(
+                "starts_on",
+                getattr(self.instance, "starts_on", None) if self.instance else None,
+            )
+            if not current:
+                attrs["starts_on"] = attrs.get("document_date") or getattr(
+                    self.instance, "document_date", None
+                )
+        start = attrs.get("starts_on")
+        if start is None and self.instance:
+            start = self.instance.starts_on or self.instance.document_date
+        end = attrs.get("ends_on")
+        if end is None and self.instance and "ends_on" not in attrs:
+            end = self.instance.ends_on
+        if start and end and end < start:
+            raise serializers.ValidationError(
+                {"ends_on": "Termination cannot be before the start date."}
+            )
         return attrs
 
 

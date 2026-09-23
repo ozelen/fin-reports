@@ -619,13 +619,8 @@ class Client(models.Model):
         return self.short_name or self.name
 
     def is_active(self, on: dt.date | None = None) -> bool:
-        """True if a contract is in force, else if the engagement window covers `on`."""
-        on = on or dt.date.today()
-        agreements = [d for d in self.documents.all() if d.kind == Document.KIND_AGREEMENT]
-        dated = [d for d in agreements if d.starts_on or d.ends_on or d.document_date]
-        if dated:
-            return any(d.in_force(on) for d in dated)
-        return date_in_force(self.active_from, self.active_to, on)
+        """True if Start/Termination on the client cover `on`."""
+        return date_in_force(self.active_from, self.active_to, on or dt.date.today())
 
     def invoice_snapshot(self) -> dict:
         return {
