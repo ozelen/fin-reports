@@ -20,6 +20,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import DescriptionIcon from "@mui/icons-material/Description";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { useParams } from "react-router-dom";
 import api from "../api";
 
@@ -40,6 +41,8 @@ const BLANK = {
   kind: "other",
   title: "",
   document_date: "",
+  starts_on: "",
+  ends_on: "",
   notes: "",
 };
 
@@ -86,6 +89,8 @@ export default function Documents() {
       kind: doc.kind,
       title: doc.title,
       document_date: doc.document_date || "",
+      starts_on: doc.starts_on || "",
+      ends_on: doc.ends_on || "",
       notes: doc.notes || "",
     });
     setFile(null);
@@ -98,7 +103,11 @@ export default function Documents() {
     body.append("kind", form.kind);
     body.append("title", form.title.trim());
     body.append("notes", form.notes || "");
-    if (form.document_date) body.append("document_date", form.document_date);
+    body.append("document_date", form.document_date || "");
+    if (!personal) {
+      body.append("starts_on", form.starts_on || "");
+      body.append("ends_on", form.ends_on || "");
+    }
     if (personal) body.append("client", "");
     else body.append("client", clientId);
     if (file) body.append("file", file);
@@ -127,14 +136,32 @@ export default function Documents() {
     load();
   };
 
-  const download = async (doc) => {
-    const res = await api.get(`/documents/${doc.id}/download/`, { responseType: "blob" });
-    const url = URL.createObjectURL(res.data);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = doc.original_filename || `${doc.title}.pdf`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const download = async (doc, redacted = false) => {
+    try {
+      const res = await api.get(`/documents/${doc.id}/download/`, {
+        params: redacted ? { redacted: 1 } : undefined,
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      const base = doc.original_filename || `${doc.title}.pdf`;
+      a.download = redacted ? base.replace(/(\.[^.]+)?$/, "-redacted$1") : base;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      const blob = e.response?.data;
+      if (blob instanceof Blob) {
+        try {
+          const body = JSON.parse(await blob.text());
+          setError(body.detail || "Download failed.");
+          return;
+        } catch {
+          /* not json */
+        }
+      }
+      setError(e.response?.data?.detail || e.message || "Download failed.");
+    }
   };
 
   const kindLabel = useMemo(
@@ -185,7 +212,14 @@ export default function Documents() {
                 <Chip size="small" label={kindLabel[doc.kind] || doc.kind} />
               </Stack>
               <Typography variant="body2" color="text.secondary">
-                {[doc.document_date, doc.original_filename].filter(Boolean).join(" · ")}
+                {[
+                  doc.starts_on || doc.ends_on
+                    ? `${doc.starts_on || "…"} → ${doc.ends_on || "open"}`
+                    : doc.document_date,
+                  doc.original_filename,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
               </Typography>
               {doc.notes && (
                 <Typography variant="body2" color="text.secondary">
@@ -193,8 +227,15 @@ export default function Documents() {
                 </Typography>
               )}
             </Box>
-            <IconButton size="small" onClick={() => download(doc)} title="Download">
+            <IconButton size="small" onClick={() => download(doc)} title="Download original">
               <DownloadIcon fontSize="small" />
+            </IconButton>
+            <IconButton
+              size="small"
+              onClick={() => download(doc, true)}
+              title="Download redacted (no bank details or amounts)"
+            >
+              <VisibilityOffIcon fontSize="small" />
             </IconButton>
             <IconButton size="small" onClick={() => openEdit(doc)}>
               <EditIcon fontSize="small" />
@@ -234,13 +275,44 @@ export default function Documents() {
               autoFocus
             />
             <TextField
-              label="Document date"
+              label={form.kind === "agreement" ? "Signed on" : "Document date"}
               type="date"
               InputLabelProps={{ shrink: true }}
               value={form.document_date}
-              onChange={(e) => setForm({ ...form, document_date: e.target.value })}
+              onChange={(e) => {
+                const document_date = e.target.value;
+                setForm((prev) => ({
+                  ...prev,
+                  document_date,
+                  starts_on:
+                    !personal && form.kind === "agreement" && !prev.starts_on
+                      ? document_date
+                      : prev.starts_on,
+                }));
+              }}
               fullWidth
             />
+            {!personal && (
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                <TextField
+                  label="Start date"
+                  type="date"
+                  InputLabelProps={{ shrink: true }}
+                  value={form.starts_on}
+                  onChange={(e) => setForm({ ...form, starts_on: e.target.value })}
+                  fullWidth
+                />
+                <TextField
+                  label="Termination date"
+                  type="date"
+                  InputLabelProps={{ shrink: true }}
+                  value={form.ends_on}
+                  onChange={(e) => setForm({ ...form, ends_on: e.target.value })}
+                  helperText="Leave empty if still open"
+                  fullWidth
+                />
+              </Stack>
+            )}
             <Button variant="outlined" component="label">
               {file
                 ? file.name

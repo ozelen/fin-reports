@@ -1,5 +1,15 @@
+import datetime as dt
+
 from django.conf import settings
 from django.db import models
+
+
+def date_in_force(start, end, on: dt.date) -> bool:
+    if start and start > on:
+        return False
+    if end and end < on:
+        return False
+    return True
 
 
 class Account(models.Model):
@@ -362,6 +372,13 @@ class Transaction(models.Model):
         blank=True,
         related_name="occurrences",
     )
+    client = models.ForeignKey(
+        "Client",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payments",
+    )
     operation_date = models.DateField()
     value_date = models.DateField(null=True, blank=True)
     concept = models.TextField()
@@ -553,10 +570,18 @@ class Client(models.Model):
         (VAT_EXEMPT, "Exempt (ZW)"),
     ]
 
+    UNIT_HOUR = "hour"
+    UNIT_DAY = "day"
+    UNIT_CHOICES = [
+        (UNIT_HOUR, "Hour"),
+        (UNIT_DAY, "Day"),
+    ]
+
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="clients"
     )
     name = models.CharField(max_length=200)
+    short_name = models.CharField(max_length=40, blank=True)
     tax_id = models.CharField(max_length=40, blank=True)
     address = models.TextField(blank=True)
     vat_mode = models.CharField(
@@ -564,10 +589,20 @@ class Client(models.Model):
     )
     default_vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     default_description = models.CharField(max_length=255, blank=True)
+    billing_unit = models.CharField(
+        max_length=8, choices=UNIT_CHOICES, default=UNIT_HOUR
+    )
     default_unit_price = models.DecimalField(
         max_digits=12, decimal_places=2, default=0
     )
     currency = models.CharField(max_length=8, default="EUR")
+    match_text = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Bank counterparty/concept text used to attach salary payments.",
+    )
+    active_from = models.DateField(null=True, blank=True)
+    active_to = models.DateField(null=True, blank=True)
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -579,6 +614,18 @@ class Client(models.Model):
 
     def __str__(self):
         return self.name
+
+    def display_name(self) -> str:
+        return self.short_name or self.name
+
+    def is_active(self, on: dt.date | None = None) -> bool:
+        """True if a contract is in force, else if the engagement window covers `on`."""
+        on = on or dt.date.today()
+        agreements = [d for d in self.documents.all() if d.kind == Document.KIND_AGREEMENT]
+        dated = [d for d in agreements if d.starts_on or d.ends_on or d.document_date]
+        if dated:
+            return any(d.in_force(on) for d in dated)
+        return date_in_force(self.active_from, self.active_to, on)
 
     def invoice_snapshot(self) -> dict:
         return {
@@ -624,6 +671,7 @@ class Invoice(models.Model):
 
     description = models.CharField(max_length=255)
     quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    unit = models.CharField(max_length=8, blank=True, default=Client.UNIT_HOUR)
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=8, default="EUR")
     vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
@@ -728,6 +776,16 @@ class Document(models.Model):
     kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=KIND_OTHER)
     title = models.CharField(max_length=255)
     document_date = models.DateField(null=True, blank=True)
+    starts_on = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Contract start date. Defaults to the signed date for agreements.",
+    )
+    ends_on = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Termination date. Empty means the contract is still open.",
+    )
     notes = models.TextField(blank=True)
     original_filename = models.CharField(max_length=255, blank=True)
     file = models.FileField(upload_to="documents/")
@@ -743,6 +801,10 @@ class Document(models.Model):
     def __str__(self):
         scope = self.client.name if self.client_id else "Personal"
         return f"{scope}: {self.title}"
+
+    def in_force(self, on: dt.date | None = None) -> bool:
+        on = on or dt.date.today()
+        return date_in_force(self.starts_on or self.document_date, self.ends_on, on)
 
 
 class Receipt(models.Model):

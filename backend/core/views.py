@@ -31,6 +31,7 @@ from .export import build_workbook
 from .filters import TransactionFilter
 from .folders import descendants, folder_transaction_ids, own_transaction_ids, subtree
 from . import invoicing
+from .redact import RedactError, known_amounts, redact_name, redact_pdf, secret_phrases
 from .fx import Converter, _unique, exclude_ignored, series_eur, summarize_eur
 from .receipts import (
     candidate_transactions,
@@ -520,10 +521,21 @@ class ClientViewSet(viewsets.ModelViewSet):
     serializer_class = ClientSerializer
 
     def get_queryset(self):
-        return Client.objects.filter(owner=self.request.user)
+        return Client.objects.filter(owner=self.request.user).prefetch_related(
+            "documents"
+        )
 
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
+        from .clients import backfill
+
+        backfill(self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save()
+        from .clients import backfill
+
+        backfill(self.request.user)
 
 
 class DocumentViewSet(viewsets.ModelViewSet):
@@ -567,7 +579,23 @@ class DocumentViewSet(viewsets.ModelViewSet):
         if not doc.file:
             raise ValidationError({"detail": "No file on this document."})
         filename = doc.original_filename or Path(doc.file.name).name
-        return FileResponse(doc.file.open("rb"), as_attachment=True, filename=filename)
+        redacted = request.query_params.get("redacted") in {"1", "true", "yes"}
+        if not redacted:
+            return FileResponse(doc.file.open("rb"), as_attachment=True, filename=filename)
+        try:
+            with doc.file.open("rb") as fh:
+                data = redact_pdf(
+                    fh.read(),
+                    secret_phrases(request.user),
+                    known_amounts(request.user),
+                )
+        except RedactError as exc:
+            raise ValidationError({"detail": str(exc)}) from exc
+        response = HttpResponse(data, content_type="application/pdf")
+        response["Content-Disposition"] = (
+            f'attachment; filename="{redact_name(filename)}"'
+        )
+        return response
 
 
 class ReceiptViewSet(
@@ -596,7 +624,11 @@ class ReceiptViewSet(
         if not receipt.file:
             raise ValidationError({"detail": "No file on this receipt."})
         filename = receipt.original_filename or Path(receipt.file.name).name
-        return FileResponse(receipt.file.open("rb"), filename=filename)
+        try:
+            fh = receipt.file.open("rb")
+        except FileNotFoundError as exc:
+            raise ValidationError({"detail": "Receipt file is missing on disk."}) from exc
+        return FileResponse(fh, filename=filename)
 
     @action(detail=True, methods=["get"])
     def matches(self, request, pk=None):
@@ -709,6 +741,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             invoice.unit_price = client.default_unit_price
         if client and "currency" not in data:
             invoice.currency = client.currency or invoice.currency
+        if client and not data.get("unit"):
+            invoice.unit = client.billing_unit or invoice.unit or "hour"
         if not invoice.number:
             invoice.number = invoicing.suggest_number(invoice.owner, invoice.issue_date)
         invoicing.apply_snapshots(invoice)
@@ -726,7 +760,23 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         if month < 1 or month > 12:
             raise ValidationError({"detail": "month must be 1–12."})
         hours_per_day = int(request.query_params.get("hours_per_day", 8))
-        advice = invoicing.advise_hours(year, month, hours_per_day=hours_per_day)
+        unit = request.query_params.get("unit") or "hour"
+        if unit not in ("hour", "day"):
+            unit = "hour"
+        start = end = None
+        client_id = request.query_params.get("client")
+        if client_id:
+            client = Client.objects.filter(owner=request.user, pk=client_id).first()
+            if client:
+                start, end = client.active_from, client.active_to
+        advice = invoicing.advise_hours(
+            year,
+            month,
+            hours_per_day=hours_per_day,
+            unit=unit,
+            start=start,
+            end=end,
+        )
         unit_price = request.query_params.get("unit_price")
         if unit_price is not None:
             from decimal import Decimal
@@ -772,20 +822,20 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         if invoice.status != Invoice.STATUS_ISSUED:
             invoicing.apply_snapshots(invoice)
             invoice.recalculate_amounts()
+        redacted = request.query_params.get("redacted") in {"1", "true", "yes"}
         content = (
-            invoicing.build_pdf(invoice)
+            invoicing.build_pdf(invoice, redacted=redacted)
             if kind == "pdf"
-            else invoicing.build_xlsx(invoice)
+            else invoicing.build_xlsx(invoice, redacted=redacted)
         )
         content_type = (
             "application/pdf"
             if kind == "pdf"
             else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+        stem = f"invoice-{invoice.number}{'-redacted' if redacted else ''}"
         response = HttpResponse(content, content_type=content_type)
-        response["Content-Disposition"] = (
-            f'attachment; filename="invoice-{invoice.number}.{kind}"'
-        )
+        response["Content-Disposition"] = f'attachment; filename="{stem}.{kind}"'
         return response
 
     @action(detail=False, methods=["post"], parser_classes=[MultiPartParser, FormParser])
@@ -831,6 +881,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             due_date=parsed["due_date"] or parsed["issue_date"] + dt.timedelta(days=14),
             description=parsed["description"] or client.default_description,
             quantity=parsed["quantity"],
+            unit=client.billing_unit or "hour",
             unit_price=parsed["unit_price"] or client.default_unit_price,
             currency=client.currency,
         )

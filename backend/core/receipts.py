@@ -222,6 +222,27 @@ def attach_new_transactions(user, transactions) -> int:
     return attached
 
 
+def _drop_other_receipts(tx: Transaction, keep: Receipt) -> None:
+    """One receipt photo per bank row — a resubmit replaces the previous parse."""
+    Receipt.objects.filter(transaction=tx).exclude(pk=keep.pk).delete()
+
+
+def _existing_purchase(receipt: Receipt) -> Receipt | None:
+    if receipt.amount is None:
+        return None
+    qs = Receipt.objects.filter(
+        owner=receipt.owner, amount=receipt.amount
+    ).exclude(pk=receipt.pk)
+    merch = (receipt.merchant or "").strip()
+    if merch:
+        qs = qs.filter(merchant__iexact=merch)
+    if receipt.document_date:
+        qs = qs.filter(
+            Q(document_date=receipt.document_date) | Q(document_date__isnull=True)
+        )
+    return qs.filter(transaction__isnull=False).order_by("id").first()
+
+
 def link_receipt(receipt: Receipt, tx: Transaction) -> None:
     pending = receipt.transaction
     if (
@@ -231,6 +252,7 @@ def link_receipt(receipt: Receipt, tx: Transaction) -> None:
         and tx.upload_id is not None
     ):
         tx = absorb_bank_into_pending(pending, tx)
+    _drop_other_receipts(tx, keep=receipt)
     receipt.transaction = tx
     receipt.save(update_fields=["transaction"])
     receipt.items.update(transaction=tx)
@@ -243,6 +265,14 @@ def ensure_placeholder(receipt: Receipt) -> Transaction | None:
         return receipt.transaction
     if receipt.amount is None:
         return None
+    twin = _existing_purchase(receipt)
+    if twin is not None:
+        tx = twin.transaction
+        _drop_other_receipts(tx, keep=receipt)
+        receipt.transaction = tx
+        receipt.save(update_fields=["transaction"])
+        receipt.items.update(transaction=tx)
+        return tx
     date = receipt.document_date or dt.date.today()
     amount = -abs(receipt.amount)
     merchant = (receipt.merchant or "").strip()
@@ -374,6 +404,11 @@ def ingest_statement(user, upload, account, result: dict) -> dict:
     recurrences_attached = attach_new_recurrences(
         user, Transaction.objects.filter(upload=upload)
     )
+    from .clients import attach_new_clients
+
+    clients_attached = attach_new_clients(
+        user, Transaction.objects.filter(upload=upload)
+    )
     apply_statement_balance(account, rows)
     return {
         "imported": upload.imported_count,
@@ -382,6 +417,7 @@ def ingest_statement(user, upload, account, result: dict) -> dict:
         "receipts_attached": receipts_attached,
         "receipts_enriched": receipts_enriched,
         "recurrences_attached": recurrences_attached,
+        "clients_attached": clients_attached,
     }
 
 

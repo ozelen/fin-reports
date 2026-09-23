@@ -124,22 +124,33 @@ class IssuerProfileSerializer(serializers.ModelSerializer):
 
 
 class ClientSerializer(serializers.ModelSerializer):
+    is_active = serializers.SerializerMethodField()
+
     class Meta:
         model = Client
         fields = [
             "id",
             "name",
+            "short_name",
             "tax_id",
             "address",
             "vat_mode",
             "default_vat_rate",
             "default_description",
+            "billing_unit",
             "default_unit_price",
             "currency",
+            "match_text",
+            "active_from",
+            "active_to",
+            "is_active",
             "notes",
             "created_at",
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "is_active", "created_at"]
+
+    def get_is_active(self, obj):
+        return obj.is_active()
 
 
 class DocumentSerializer(serializers.ModelSerializer):
@@ -158,6 +169,8 @@ class DocumentSerializer(serializers.ModelSerializer):
             "kind_label",
             "title",
             "document_date",
+            "starts_on",
+            "ends_on",
             "notes",
             "original_filename",
             "file",
@@ -169,6 +182,8 @@ class DocumentSerializer(serializers.ModelSerializer):
             "file": {"required": False},
             "notes": {"required": False, "allow_blank": True},
             "document_date": {"required": False, "allow_null": True},
+            "starts_on": {"required": False, "allow_null": True},
+            "ends_on": {"required": False, "allow_null": True},
         }
 
     def get_file_url(self, obj):
@@ -179,12 +194,30 @@ class DocumentSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(url) if request else url
 
     def to_internal_value(self, data):
-        # Multipart forms send client="" for personal docs.
+        # Multipart forms send client="" for personal docs and empty dates as "".
         if hasattr(data, "copy"):
             data = data.copy()
             if data.get("client") in ("", None):
                 data["client"] = None
+            for key in ("document_date", "starts_on", "ends_on"):
+                if data.get(key) == "":
+                    data[key] = None
         return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        kind = attrs.get("kind", getattr(self.instance, "kind", None))
+        if kind != Document.KIND_AGREEMENT:
+            return attrs
+        current = attrs.get(
+            "starts_on",
+            getattr(self.instance, "starts_on", None) if self.instance else None,
+        )
+        if current:
+            return attrs
+        attrs["starts_on"] = attrs.get("document_date") or getattr(
+            self.instance, "document_date", None
+        )
+        return attrs
 
 
 class InvoiceSerializer(serializers.ModelSerializer):
@@ -211,6 +244,7 @@ class InvoiceSerializer(serializers.ModelSerializer):
             "due_date",
             "description",
             "quantity",
+            "unit",
             "unit_price",
             "currency",
             "vat_rate",
@@ -563,6 +597,8 @@ class TransactionSerializer(serializers.ModelSerializer):
         source="recurrence_id", read_only=True, allow_null=True
     )
     recurrence_name = serializers.SerializerMethodField()
+    client = serializers.IntegerField(source="client_id", read_only=True, allow_null=True)
+    client_label = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
@@ -587,6 +623,8 @@ class TransactionSerializer(serializers.ModelSerializer):
             "item_count",
             "recurrence",
             "recurrence_name",
+            "client",
+            "client_label",
             "created_at",
         ]
         read_only_fields = fields
@@ -603,6 +641,10 @@ class TransactionSerializer(serializers.ModelSerializer):
     def get_recurrence_name(self, obj):
         rec = getattr(obj, "recurrence", None)
         return rec.name if rec else None
+
+    def get_client_label(self, obj):
+        client = getattr(obj, "client", None)
+        return client.display_name() if client else None
 
 
 class RuleSerializer(serializers.ModelSerializer):

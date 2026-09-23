@@ -48,7 +48,40 @@ const SOURCE_LABEL = {
   calendar: "Working days",
   invoice: "Invoice",
   override: "Override",
+  bank: "Bank",
+  mixed: "Mixed",
 };
+
+const RECEIVED_SOURCES = new Set(["bank", "invoice"]);
+const EXPECTED_SOURCES = new Set(["calendar", "override"]);
+
+function forecastTotals(est) {
+  const received = {};
+  const expected = {};
+  let receivedTotal = 0;
+  let expectedTotal = 0;
+  for (const row of est.months || []) {
+    if (est.clients?.length) {
+      for (const c of est.clients) {
+        const cell = row.by_client?.[String(c.id)];
+        const amt = Number(cell?.amount || 0);
+        if (!amt) continue;
+        if (RECEIVED_SOURCES.has(cell?.source)) {
+          received[c.id] = (received[c.id] || 0) + amt;
+          receivedTotal += amt;
+        } else if (EXPECTED_SOURCES.has(cell?.source)) {
+          expected[c.id] = (expected[c.id] || 0) + amt;
+          expectedTotal += amt;
+        }
+      }
+    } else if (row.bucket === "ytd") {
+      receivedTotal += Number(row.amount || 0);
+    } else {
+      expectedTotal += Number(row.amount || 0);
+    }
+  }
+  return { received, expected, receivedTotal, expectedTotal };
+}
 
 function Kpi({ label, value, color, hint }) {
   return (
@@ -176,22 +209,26 @@ export default function Taxes() {
         <>
           <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap", mb: 2 }} useFlexGap>
             <Kpi
-              label="YTD income"
+              label="Earned so far"
               value={currency(est.income.ytd)}
               color="success.main"
-              hint={
-                est.income.source === "hours"
-                  ? `${est.income.hourly_rate} €/h · Mon–Fri`
-                  : est.income.source
-              }
+              hint="Bank + invoices already in this year"
             />
-            <Kpi label="Planned income" value={currency(est.income.planned)} />
-            <Kpi label="Rendimiento neto" value={currency(est.rendimiento_neto)} />
+            <Kpi
+              label="Still expected"
+              value={currency(est.income.planned)}
+              hint="Rest of this year on the calendar"
+            />
+            <Kpi
+              label="Taxable profit"
+              value={currency(est.rendimiento_neto)}
+              hint="Year income − RETA − deductible spends − 5% simplificada"
+            />
             <Kpi
               label="Still to set aside"
               value={currency(est.set_aside)}
               color="error.main"
-              hint="Remaining RETA + modelo 130"
+              hint="RETA cuotas + modelo 130 still unpaid this year"
             />
           </Stack>
 
@@ -200,9 +237,9 @@ export default function Taxes() {
               <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
                 Income & expenses
               </Typography>
-              <Row label="Income YTD" value={currency(est.income.ytd)} />
+              <Row label="Earned so far" value={currency(est.income.ytd)} />
               <Row
-                label={est.income.override ? "Planned (override)" : "Planned remaining"}
+                label={est.income.override ? "Still expected (override)" : "Still expected"}
                 value={currency(est.income.planned)}
               />
               <Row label="Deductible expenses YTD" value={currency(est.expenses.ytd)} />
@@ -241,50 +278,23 @@ export default function Taxes() {
             </Paper>
           </Stack>
 
-          <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+          <Paper variant="outlined" sx={{ p: 2, mb: 2, overflowX: "auto" }}>
             <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
               Salary forecast
             </Typography>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              {est.income.hourly_rate} €/h × {est.income.hours_per_day}h × Mon–Fri.
-              Edit hours to override a month; issued invoices replace the calendar.
+              {est.clients?.length
+                ? "One column per client with invoices, matched salary, or an active engagement this year. Issued invoices and bank payments replace the calendar."
+                : `${est.income.hourly_rate} €/h × ${est.income.hours_per_day}h × Mon–Fri.`}
+              {" "}
+              Edit hours to override hour-billed calendar months.
             </Typography>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Month</TableCell>
-                  <TableCell align="right">Days</TableCell>
-                  <TableCell align="right">Hours</TableCell>
-                  <TableCell>Source</TableCell>
-                  <TableCell align="right">Amount</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {est.months?.map((row) => (
-                  <TableRow key={row.key} sx={{ opacity: row.bucket === "planned" ? 1 : 0.95 }}>
-                    <TableCell>{MONTHS[row.month - 1]}</TableCell>
-                    <TableCell align="right">{row.working_days}</TableCell>
-                    <TableCell align="right" sx={{ width: 110 }}>
-                      <TextField
-                        size="small"
-                        type="number"
-                        value={hoursDraft[row.key] ?? row.hours}
-                        onChange={(e) =>
-                          setHoursDraft({ ...hoursDraft, [row.key]: e.target.value })
-                        }
-                        onBlur={() => saveMonthHours(row)}
-                        inputProps={{ step: 1, min: 0, style: { textAlign: "right" } }}
-                        variant="standard"
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Chip size="small" variant="outlined" label={SOURCE_LABEL[row.source] || row.source} />
-                    </TableCell>
-                    <TableCell align="right">{currency(row.amount)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+            <ForecastTable
+              est={est}
+              hoursDraft={hoursDraft}
+              setHoursDraft={setHoursDraft}
+              saveMonthHours={saveMonthHours}
+            />
           </Paper>
 
           <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
@@ -512,6 +522,103 @@ export default function Taxes() {
         </DialogActions>
       </Dialog>
     </Box>
+  );
+}
+
+function ForecastTable({ est, hoursDraft, setHoursDraft, saveMonthHours }) {
+  const totals = forecastTotals(est);
+  const clients = est.clients || [];
+  return (
+    <Table size="small">
+      <TableHead>
+        <TableRow>
+          <TableCell>Month</TableCell>
+          <TableCell align="right">Days</TableCell>
+          <TableCell align="right">Hours</TableCell>
+          {clients.map((c) => (
+            <TableCell key={c.id} align="right">
+              {c.short_name || c.name}
+            </TableCell>
+          ))}
+          <TableCell>Source</TableCell>
+          <TableCell align="right">Total</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {est.months?.map((row) => (
+          <TableRow key={row.key} sx={{ opacity: row.bucket === "planned" ? 1 : 0.95 }}>
+            <TableCell>{MONTHS[row.month - 1]}</TableCell>
+            <TableCell align="right">{row.working_days}</TableCell>
+            <TableCell align="right" sx={{ width: 110 }}>
+              <TextField
+                size="small"
+                type="number"
+                value={hoursDraft[row.key] ?? row.hours}
+                onChange={(e) => setHoursDraft({ ...hoursDraft, [row.key]: e.target.value })}
+                onBlur={() => saveMonthHours(row)}
+                inputProps={{ step: 1, min: 0, style: { textAlign: "right" } }}
+                variant="standard"
+              />
+            </TableCell>
+            {clients.map((c) => (
+              <TableCell key={c.id} align="right">
+                {currency(row.by_client?.[String(c.id)]?.amount || 0)}
+              </TableCell>
+            ))}
+            <TableCell>
+              <Chip size="small" variant="outlined" label={SOURCE_LABEL[row.source] || row.source} />
+            </TableCell>
+            <TableCell align="right">{currency(row.amount)}</TableCell>
+          </TableRow>
+        ))}
+        <TableRow>
+          <TableCell sx={{ fontWeight: 700 }} colSpan={3}>
+            Received
+          </TableCell>
+          {clients.map((c) => (
+            <TableCell key={c.id} align="right" sx={{ fontWeight: 700 }}>
+              {currency(totals.received[c.id] || 0)}
+            </TableCell>
+          ))}
+          <TableCell>
+            <Chip size="small" variant="outlined" label="Bank + invoice" />
+          </TableCell>
+          <TableCell align="right" sx={{ fontWeight: 700 }}>
+            {currency(totals.receivedTotal)}
+          </TableCell>
+        </TableRow>
+        <TableRow>
+          <TableCell sx={{ fontWeight: 700 }} colSpan={3}>
+            Expected
+          </TableCell>
+          {clients.map((c) => (
+            <TableCell key={c.id} align="right" sx={{ fontWeight: 700 }}>
+              {currency(totals.expected[c.id] || 0)}
+            </TableCell>
+          ))}
+          <TableCell>
+            <Chip size="small" variant="outlined" label="Calendar" />
+          </TableCell>
+          <TableCell align="right" sx={{ fontWeight: 700 }}>
+            {currency(totals.expectedTotal)}
+          </TableCell>
+        </TableRow>
+        <TableRow>
+          <TableCell sx={{ fontWeight: 700 }} colSpan={3}>
+            Year
+          </TableCell>
+          {clients.map((c) => (
+            <TableCell key={c.id} align="right" sx={{ fontWeight: 700 }}>
+              {currency((totals.received[c.id] || 0) + (totals.expected[c.id] || 0))}
+            </TableCell>
+          ))}
+          <TableCell />
+          <TableCell align="right" sx={{ fontWeight: 700 }}>
+            {currency(totals.receivedTotal + totals.expectedTotal)}
+          </TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
   );
 }
 

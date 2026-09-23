@@ -5,12 +5,15 @@ from types import SimpleNamespace
 from unittest import TestCase
 
 from core.budgets import irpf_monthly_in_window, rec_planned
-from core.invoicing import working_days_in_month
+from core.invoicing import advise_hours, working_days_in_month
+from core.models import Client
 from core.tax import (
+    calendar_amount,
     classify_payment,
     dedupe_payments,
     m130_due,
     modelo_130_quarters,
+    month_client_plan,
     month_hours_plan,
     parse_cuota_period,
     parse_irpf_year,
@@ -96,6 +99,16 @@ class ClassifyPaymentTests(TestCase):
 class HoursPlanTests(TestCase):
     def test_july_2026_is_184_hours(self):
         self.assertEqual(working_days_in_month(2026, 7), 23)
+        self.assertEqual(working_days_in_month(2026, 9), 22)
+        self.assertEqual(
+            working_days_in_month(2026, 9, start=date(2026, 9, 21)), 8
+        )
+        self.assertEqual(
+            working_days_in_month(
+                2027, 3, start=date(2026, 9, 21), end=date(2027, 3, 20)
+            ),
+            15,
+        )
         profile = SimpleNamespace(
             hourly_rate=Decimal("30"),
             hours_per_day=8,
@@ -119,6 +132,97 @@ class HoursPlanTests(TestCase):
         self.assertEqual(rows[7]["source"], "override")
         self.assertEqual(rows[7]["hours"], 152.0)
         self.assertEqual(rows[7]["amount"], 4560.0)
+
+
+class ClientPlanTests(TestCase):
+    def test_day_rate_uses_working_days(self):
+        client = SimpleNamespace(
+            id=2,
+            billing_unit=Client.UNIT_DAY,
+            default_unit_price=Decimal("400"),
+            currency="EUR",
+        )
+        qty, amount, source = calendar_amount(
+            client,
+            days=23,
+            hours_per_day=8,
+            hours_override=None,
+            conv=None,
+            fx_date=date(2026, 7, 31),
+        )
+        self.assertEqual(source, "calendar")
+        self.assertEqual(qty, Decimal("23"))
+        self.assertEqual(amount, Decimal("9200.00"))
+
+    def test_day_rate_clips_to_contract_start(self):
+        client = SimpleNamespace(
+            id=6,
+            billing_unit=Client.UNIT_DAY,
+            default_unit_price=Decimal("410"),
+            currency="EUR",
+            active_from=date(2026, 9, 21),
+            active_to=date(2027, 3, 20),
+        )
+        profile = SimpleNamespace(hours_per_day=8, hours_overrides={})
+        rows = month_client_plan(
+            profile,
+            2026,
+            [client],
+            invoices={},
+            bank={},
+            conv=None,
+            today=date(2026, 9, 23),
+        )
+        sep = rows[8]
+        self.assertEqual(sep["by_client"]["6"]["source"], "calendar")
+        self.assertEqual(sep["by_client"]["6"]["quantity"], 8.0)
+        self.assertEqual(sep["by_client"]["6"]["amount"], 3280.0)
+        advice = advise_hours(
+            2026,
+            9,
+            unit=Client.UNIT_DAY,
+            start=date(2026, 9, 21),
+            end=date(2027, 3, 20),
+        )
+        self.assertEqual(advice["working_days"], 8)
+        self.assertEqual(advice["suggested_quantity"], 8)
+
+    def test_columns_mix_invoice_bank_and_calendar(self):
+        profile = SimpleNamespace(hours_per_day=8, hours_overrides={})
+        netguru = SimpleNamespace(
+            id=1,
+            billing_unit=Client.UNIT_HOUR,
+            default_unit_price=Decimal("30"),
+            currency="EUR",
+            active_from=date(2026, 4, 1),
+            active_to=None,
+        )
+        pinup = SimpleNamespace(
+            id=2,
+            billing_unit=Client.UNIT_HOUR,
+            default_unit_price=Decimal("50"),
+            currency="EUR",
+            active_from=date(2025, 2, 1),
+            active_to=date(2025, 5, 31),
+        )
+        rows = month_client_plan(
+            profile,
+            2026,
+            [netguru, pinup],
+            invoices={(1, 7): (Decimal("184"), Decimal("5520"))},
+            bank={(1, 6): Decimal("4800")},
+            conv=None,
+        )
+        june = rows[5]
+        july = rows[6]
+        jan = rows[0]
+        self.assertEqual(june["by_client"]["1"]["source"], "bank")
+        self.assertEqual(june["by_client"]["1"]["amount"], 4800.0)
+        self.assertEqual(july["by_client"]["1"]["source"], "invoice")
+        self.assertEqual(july["amount"], 5520.0)
+        self.assertIsNone(jan["by_client"]["1"]["source"])
+        self.assertIsNone(jan["by_client"]["2"]["source"])
+        self.assertEqual(jan["amount"], 0.0)
 
 
 class Modelo130QuarterTests(TestCase):

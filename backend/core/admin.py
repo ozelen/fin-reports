@@ -92,12 +92,13 @@ class TransactionAdmin(admin.ModelAdmin):
         "amount",
         "currency",
         "account",
+        "client",
         "counterparty",
         "concept",
         "pending",
         "owner",
     )
-    list_filter = ("owner", "account", "currency", "operation_date")
+    list_filter = ("owner", "account", "client", "currency", "operation_date")
     search_fields = ("concept", "counterparty")
     inlines = [TransactionTagInline, TxPurchaseItemInline]
 
@@ -192,9 +193,19 @@ class IssuerProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Client)
 class ClientAdmin(admin.ModelAdmin):
-    list_display = ("name", "tax_id", "vat_mode", "currency", "owner", "created_at")
-    list_filter = ("owner", "vat_mode", "currency")
-    search_fields = ("name", "tax_id")
+    list_display = (
+        "name",
+        "short_name",
+        "is_active",
+        "billing_unit",
+        "tax_id",
+        "vat_mode",
+        "currency",
+        "owner",
+        "created_at",
+    )
+    list_filter = ("owner", "vat_mode", "currency", "billing_unit")
+    search_fields = ("name", "tax_id", "match_text")
 
 
 @admin.register(Document)
@@ -204,6 +215,8 @@ class DocumentAdmin(admin.ModelAdmin):
         "kind",
         "client",
         "document_date",
+        "starts_on",
+        "ends_on",
         "owner",
         "created_at",
     )

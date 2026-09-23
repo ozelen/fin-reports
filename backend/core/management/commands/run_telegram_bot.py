@@ -150,7 +150,17 @@ def _save_offset(value: int) -> None:
 
 
 def _owner():
+    linked = TelegramLink.objects.select_related("owner").order_by("id").first()
+    if linked:
+        return linked.owner
     return get_user_model().objects.filter(is_superuser=True).order_by("id").first()
+
+
+def _link_for(user):
+    return (
+        TelegramLink.objects.filter(owner=user).order_by("id").first()
+        or TelegramLink.objects.order_by("id").first()
+    )
 
 
 def _handle_message(message: dict) -> None:
@@ -183,6 +193,7 @@ def _handle_message(message: dict) -> None:
         telegram_user_id=user_id,
         defaults={"owner": owner, "chat_id": chat_id, "messages": []},
     )
+    owner = link.owner
     if link.chat_id != chat_id:
         link.chat_id = chat_id
         link.save(update_fields=["chat_id"])
@@ -258,6 +269,7 @@ def _handle_media_group(messages: list[dict]) -> None:
         telegram_user_id=user_id,
         defaults={"owner": owner, "chat_id": chat_id, "messages": []},
     )
+    owner = link.owner
     match_pending_receipts(owner)
     caption = next(((m.get("caption") or "").strip() for m in messages if m.get("caption")), "")
     files = []
@@ -422,7 +434,7 @@ def _try_parse_one() -> None:
     receipt = pending_parse_qs().first()
     if receipt is None:
         return
-    link = TelegramLink.objects.filter(owner=receipt.owner).order_by("id").first()
+    link = _link_for(receipt.owner)
     if link and receipt.id not in _announced_parse:
         _announced_parse.add(receipt.id)
         _say(link.chat_id, f"Parsing {receipt.get_kind_display().lower()} #{receipt.id}…")
@@ -458,7 +470,7 @@ def _try_parse_one() -> None:
     line += f" · {status}"
     if left:
         line += f" ({left} still queued)"
-    link = TelegramLink.objects.filter(owner=receipt.owner).order_by("id").first()
+    link = _link_for(receipt.owner)
     if link:
         _say(link.chat_id, line)
 

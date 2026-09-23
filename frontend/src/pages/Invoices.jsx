@@ -19,6 +19,7 @@ import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
+import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import LockIcon from "@mui/icons-material/Lock";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import { Link as RouterLink, useOutletContext, useParams } from "react-router-dom";
@@ -53,6 +54,7 @@ const blankInvoice = () => {
     due_date: "",
     description: "",
     quantity: "",
+    unit: "hour",
     unit_price: "",
     currency: "EUR",
     number: "",
@@ -106,9 +108,15 @@ export default function Invoices() {
   const lockedClient =
     routeClient || clients.find((c) => c.id === lockedClientId) || null;
 
-  const refreshAdvice = async (year, month, unitPrice) => {
+  const refreshAdvice = async (year, month, unitPrice, unit = "hour", clientId) => {
     const { data } = await api.get("/invoices/advise/", {
-      params: { year, month, unit_price: unitPrice || undefined },
+      params: {
+        year,
+        month,
+        unit_price: unitPrice || undefined,
+        unit,
+        client: clientId || undefined,
+      },
     });
     setAdvice(data);
     return data;
@@ -125,10 +133,17 @@ export default function Invoices() {
       base.description = defaultClient.default_description || "";
       base.unit_price = defaultClient.default_unit_price || "30";
       base.currency = defaultClient.currency || "EUR";
+      base.unit = defaultClient.billing_unit || "hour";
     }
     if (defaultAccount) base.account = defaultAccount.id || defaultAccount;
-    const adv = await refreshAdvice(base.service_year, base.service_month, base.unit_price);
-    base.quantity = String(adv.suggested_hours);
+    const adv = await refreshAdvice(
+      base.service_year,
+      base.service_month,
+      base.unit_price,
+      base.unit,
+      defaultClient?.id
+    );
+    base.quantity = String(adv.suggested_quantity ?? adv.suggested_hours);
     base.sale_date = adv.sale_date;
     base.due_date = adv.suggested_due_date;
     base.number = adv.suggested_number;
@@ -149,19 +164,26 @@ export default function Invoices() {
       due_date: inv.due_date,
       description: inv.description,
       quantity: String(inv.quantity),
+      unit: inv.unit || "hour",
       unit_price: String(inv.unit_price),
       currency: inv.currency,
       number: inv.number,
       notes: inv.notes || "",
     });
-    refreshAdvice(inv.service_year, inv.service_month, inv.unit_price);
+    refreshAdvice(
+      inv.service_year,
+      inv.service_month,
+      inv.unit_price,
+      inv.unit || "hour",
+      inv.client
+    );
     setInvOpen(true);
   };
 
   const onServiceChange = async (year, month) => {
     const next = { ...form, service_year: year, service_month: month };
-    const adv = await refreshAdvice(year, month, next.unit_price);
-    next.quantity = String(adv.suggested_hours);
+    const adv = await refreshAdvice(year, month, next.unit_price, next.unit, next.client);
+    next.quantity = String(adv.suggested_quantity ?? adv.suggested_hours);
     next.sale_date = adv.sale_date;
     setForm(next);
   };
@@ -205,15 +227,15 @@ export default function Invoices() {
     }
   };
 
-  const download = async (inv, kind) => {
+  const download = async (inv, kind, redacted = false) => {
     const res = await api.get(`/invoices/${inv.id}/download/`, {
-      params: { kind },
+      params: { kind, ...(redacted ? { redacted: 1 } : {}) },
       responseType: "blob",
     });
     const url = URL.createObjectURL(res.data);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `invoice-${inv.number}.${kind}`;
+    a.download = `invoice-${inv.number}${redacted ? "-redacted" : ""}.${kind}`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -309,7 +331,8 @@ export default function Invoices() {
                 )}
               </Stack>
               <Typography variant="body2" color="text.secondary">
-                {inv.description} · {inv.quantity}h × {inv.unit_price} · sale {inv.sale_date} ·
+                {inv.description} · {inv.quantity}
+                {inv.unit === "day" ? "d" : "h"} × {inv.unit_price} · sale {inv.sale_date} ·
                 issue {inv.issue_date}
               </Typography>
               <Typography variant="body2" color="text.secondary">
@@ -320,11 +343,21 @@ export default function Invoices() {
             <Typography sx={{ fontWeight: 600, whiteSpace: "nowrap" }}>
               {money(inv.total_amount, inv.currency)}
             </Typography>
-            <IconButton size="small" onClick={() => download(inv, "pdf")} title="PDF">
-              <DownloadIcon fontSize="small" />
-            </IconButton>
+            <Button size="small" onClick={() => download(inv, "pdf")} startIcon={<DownloadIcon />}>
+              PDF
+            </Button>
+            <Button
+              size="small"
+              onClick={() => download(inv, "pdf", true)}
+              startIcon={<VisibilityOffIcon />}
+            >
+              Redacted
+            </Button>
             <Button size="small" onClick={() => download(inv, "xlsx")}>
               XLSX
+            </Button>
+            <Button size="small" onClick={() => download(inv, "xlsx", true)}>
+              XLSX redacted
             </Button>
             {!inv.is_issued && (
               <>
@@ -353,9 +386,15 @@ export default function Invoices() {
             {advice && (
               <Alert severity="info">
                 Working days in {advice.month}/{advice.year}: <b>{advice.working_days}</b> →
-                suggested <b>{advice.suggested_hours}h</b>
+                suggested{" "}
+                <b>
+                  {advice.suggested_quantity ?? advice.suggested_hours}
+                  {form.unit === "day" ? " days" : "h"}
+                </b>
                 {advice.suggested_net != null && <> · advisory net {money(advice.suggested_net, form.currency)}</>}
-                {" "}(8 × Mon–Fri; override hours below)
+                {form.unit === "day"
+                  ? " (Mon–Fri days; override below)"
+                  : " (8 × Mon–Fri; override hours below)"}
               </Alert>
             )}
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
@@ -366,13 +405,22 @@ export default function Invoices() {
                   value={form.client}
                   onChange={(e) => {
                     const c = clients.find((x) => x.id === Number(e.target.value));
+                    const unit = c?.billing_unit || form.unit;
                     setForm({
                       ...form,
                       client: e.target.value,
                       description: c?.default_description || form.description,
                       unit_price: c?.default_unit_price || form.unit_price,
                       currency: c?.currency || form.currency,
+                      unit,
                     });
+                    refreshAdvice(
+                      form.service_year,
+                      form.service_month,
+                      c?.default_unit_price || form.unit_price,
+                      unit,
+                      c?.id
+                    );
                   }}
                   fullWidth
                 >
@@ -460,7 +508,7 @@ export default function Invoices() {
             />
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
               <TextField
-                label="Hours"
+                label={form.unit === "day" ? "Days" : "Hours"}
                 type="number"
                 value={form.quantity}
                 onChange={(e) => setForm({ ...form, quantity: e.target.value })}

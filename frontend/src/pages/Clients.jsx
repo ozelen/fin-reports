@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Box,
   Button,
@@ -9,14 +9,12 @@ import {
   DialogTitle,
   IconButton,
   MenuItem,
-  Paper,
   Stack,
   TextField,
   Typography,
 } from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
 import AddIcon from "@mui/icons-material/Add";
-import BusinessIcon from "@mui/icons-material/Business";
-import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { useNavigate } from "react-router-dom";
 import api from "../api";
@@ -29,15 +27,25 @@ const VAT_MODES = [
 
 const CURRENCIES = ["EUR", "USD", "GBP", "PLN", "CHF"];
 
+const BILLING_UNITS = [
+  { value: "hour", label: "Hour" },
+  { value: "day", label: "Day" },
+];
+
 const BLANK = {
   name: "",
+  short_name: "",
   tax_id: "",
   address: "",
   vat_mode: "reverse_charge",
   default_vat_rate: "0",
   default_description: "",
+  billing_unit: "hour",
   default_unit_price: "30",
   currency: "EUR",
+  match_text: "",
+  active_from: "",
+  active_to: "",
   notes: "",
 };
 
@@ -66,6 +74,8 @@ export default function Clients() {
       ...form,
       default_vat_rate: form.default_vat_rate || "0",
       default_unit_price: form.default_unit_price || "0",
+      active_from: form.active_from || null,
+      active_to: form.active_to || null,
     };
     const { data } = await api.post("/clients/", payload);
     setOpen(false);
@@ -84,6 +94,80 @@ export default function Clients() {
 
   const vatLabel = (mode) => VAT_MODES.find((m) => m.value === mode)?.label || mode;
 
+  const columns = useMemo(
+    () => [
+      {
+        field: "name",
+        headerName: "Name",
+        flex: 1,
+        minWidth: 200,
+        renderCell: (p) => (
+          <Button
+            size="small"
+            onClick={() => navigate(`/clients/${p.row.id}/details`)}
+            sx={{ textTransform: "none", fontWeight: 600, justifyContent: "flex-start" }}
+          >
+            {p.row.short_name ? `${p.row.short_name} · ${p.value}` : p.value}
+          </Button>
+        ),
+      },
+      {
+        field: "is_active",
+        headerName: "Status",
+        width: 120,
+        renderCell: (p) => (
+          <Chip
+            size="small"
+            color={p.value ? "success" : "default"}
+            label={p.value ? "Active" : "Inactive"}
+          />
+        ),
+      },
+      {
+        field: "default_unit_price",
+        headerName: "Rate",
+        width: 140,
+        valueGetter: (_, row) =>
+          `${row.default_unit_price} ${row.currency}/${row.billing_unit === "day" ? "day" : "h"}`,
+      },
+      {
+        field: "vat_mode",
+        headerName: "VAT",
+        width: 170,
+        valueGetter: (value) => vatLabel(value),
+      },
+      { field: "tax_id", headerName: "Tax ID", width: 140 },
+      { field: "active_from", headerName: "Start", width: 120 },
+      {
+        field: "active_to",
+        headerName: "Termination",
+        width: 130,
+        valueGetter: (value) => value || "open",
+      },
+      { field: "match_text", headerName: "Bank match", width: 140 },
+      {
+        field: "actions",
+        headerName: "",
+        width: 70,
+        sortable: false,
+        filterable: false,
+        renderCell: (p) => (
+          <IconButton
+            size="small"
+            color="error"
+            onClick={(e) => {
+              e.stopPropagation();
+              remove(p.row);
+            }}
+          >
+            <DeleteIcon fontSize="small" />
+          </IconButton>
+        ),
+      },
+    ],
+    [navigate]
+  );
+
   return (
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
@@ -95,54 +179,33 @@ export default function Clients() {
         </Button>
       </Stack>
 
-      <Stack spacing={1}>
-        {clients.map((c) => (
-          <Paper
-            key={c.id}
-            variant="outlined"
-            sx={{
-              p: 1.5,
-              display: "flex",
-              alignItems: "center",
-              gap: 2,
-              cursor: "pointer",
-              "&:hover": { bgcolor: "action.hover" },
-            }}
-            onClick={() => navigate(`/clients/${c.id}/details`)}
-          >
-            <BusinessIcon color="action" />
-            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                <Typography sx={{ fontWeight: 600 }}>{c.name}</Typography>
-                <Chip size="small" variant="outlined" label={vatLabel(c.vat_mode)} />
-                <Chip size="small" variant="outlined" label={c.currency} />
-              </Stack>
-              <Typography variant="body2" color="text.secondary">
-                {[c.tax_id && `NIP/VAT ${c.tax_id}`, c.default_description].filter(Boolean).join(" · ") ||
-                  "—"}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Default {c.default_unit_price} {c.currency}/h
-                {c.address ? ` · ${c.address}` : ""}
-              </Typography>
-            </Box>
-            <IconButton
-              size="small"
-              color="error"
-              onClick={(e) => {
-                e.stopPropagation();
-                remove(c);
-              }}
-            >
-              <DeleteIcon fontSize="small" />
-            </IconButton>
-            <ChevronRightIcon color="action" />
-          </Paper>
-        ))}
-        {clients.length === 0 && (
-          <Typography color="text.secondary">No clients yet.</Typography>
-        )}
-      </Stack>
+      <DataGrid
+        autoHeight
+        rows={clients}
+        columns={columns}
+        pageSizeOptions={[25, 50, 100]}
+        initialState={{
+          pagination: { paginationModel: { pageSize: 25 } },
+          sorting: { sortModel: [{ field: "is_active", sort: "desc" }] },
+        }}
+        disableRowSelectionOnClick
+        onRowClick={(p) => navigate(`/clients/${p.id}/details`)}
+        getRowClassName={(p) => (p.row.is_active ? "" : "row-inactive")}
+        sx={{
+          bgcolor: "background.paper",
+          "& .MuiDataGrid-cell": {
+            display: "flex",
+            alignItems: "center",
+          },
+          "& .MuiDataGrid-row": { cursor: "pointer" },
+          "& .row-inactive": { opacity: 0.6 },
+        }}
+      />
+      {clients.length === 0 && (
+        <Typography color="text.secondary" sx={{ mt: 2 }}>
+          No clients yet.
+        </Typography>
+      )}
 
       <Dialog open={open} onClose={() => setOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>New client</DialogTitle>
@@ -153,6 +216,13 @@ export default function Clients() {
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               autoFocus
+              fullWidth
+            />
+            <TextField
+              label="Short name"
+              value={form.short_name}
+              onChange={(e) => setForm({ ...form, short_name: e.target.value })}
+              helperText="Shown on the tax forecast columns"
               fullWidth
             />
             <TextField
@@ -199,7 +269,20 @@ export default function Clients() {
             />
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
               <TextField
-                label="Default unit price"
+                select
+                label="Billed by"
+                value={form.billing_unit}
+                onChange={(e) => setForm({ ...form, billing_unit: e.target.value })}
+                fullWidth
+              >
+                {BILLING_UNITS.map((u) => (
+                  <MenuItem key={u.value} value={u.value}>
+                    {u.label}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <TextField
+                label={form.billing_unit === "day" ? "Daily rate" : "Hourly rate"}
                 type="number"
                 value={form.default_unit_price}
                 onChange={(e) => setForm({ ...form, default_unit_price: e.target.value })}
@@ -218,6 +301,32 @@ export default function Clients() {
                   </MenuItem>
                 ))}
               </TextField>
+            </Stack>
+            <TextField
+              label="Bank match text"
+              value={form.match_text}
+              onChange={(e) => setForm({ ...form, match_text: e.target.value })}
+              helperText="Attach salary inflows whose counterparty/concept contains this"
+              fullWidth
+            />
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+              <TextField
+                label="Contract start"
+                type="date"
+                value={form.active_from}
+                onChange={(e) => setForm({ ...form, active_from: e.target.value })}
+                InputLabelProps={{ shrink: true }}
+                fullWidth
+              />
+              <TextField
+                label="Termination date"
+                type="date"
+                value={form.active_to}
+                onChange={(e) => setForm({ ...form, active_to: e.target.value })}
+                InputLabelProps={{ shrink: true }}
+                helperText="Leave empty if the engagement is still open"
+                fullWidth
+              />
             </Stack>
             <TextField
               label="Notes"

@@ -8,8 +8,9 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from django.db.models import Q, Sum
 
-from .invoicing import working_days_in_month
-from .models import Invoice, Recurrence, TaxProfile, Transaction
+from .fx import Converter
+from .invoicing import last_day_of_month, working_days_in_month
+from .models import Client, Invoice, Recurrence, TaxProfile, Transaction
 from .recurrences import remaining_dates
 
 _ZERO = Decimal("0")
@@ -425,7 +426,7 @@ def _load_bank_tax(user) -> list[dict]:
 
 
 def _invoice_months(user, year: int) -> dict[int, tuple[Decimal, Decimal]]:
-    """service_month → (hours, net)."""
+    """service_month → (hours, net). Used when no clients are in scope."""
     out: dict[int, tuple[Decimal, Decimal]] = {}
     qs = Invoice.objects.filter(owner=user, service_year=year).exclude(
         status=Invoice.STATUS_DRAFT
@@ -441,6 +442,132 @@ def _invoice_months(user, year: int) -> dict[int, tuple[Decimal, Decimal]]:
             continue
         out[inv.service_month] = (_d(inv.quantity), _d(inv.net_amount))
     return out
+
+
+def engagement_overlaps(client, start: dt.date, end: dt.date) -> bool:
+    if client.active_from and client.active_from > end:
+        return False
+    if client.active_to and client.active_to < start:
+        return False
+    return True
+
+
+def client_engaged(client, year: int, month: int) -> bool:
+    start = dt.date(year, month, 1)
+    end = last_day_of_month(year, month)
+    return engagement_overlaps(client, start, end)
+
+
+def _to_eur(conv: Converter | None, amount, currency, day) -> Decimal:
+    amount = _d(amount)
+    currency = (currency or "EUR").upper()
+    if not amount or currency == "EUR" or conv is None:
+        return amount
+    eur = conv.to_eur(amount, currency, day)
+    return _d(eur) if eur is not None else amount
+
+
+def clients_for_year(user, year: int, today: dt.date | None = None) -> list[Client]:
+    today = today or dt.date.today()
+    year_start = dt.date(year, 1, 1)
+    year_end = dt.date(year, 12, 31)
+    invoice_ids = set(
+        Invoice.objects.filter(owner=user, service_year=year).values_list(
+            "client_id", flat=True
+        )
+    )
+    tx_ids = set(
+        Transaction.objects.filter(
+            owner=user,
+            client_id__isnull=False,
+            amount__gt=0,
+            operation_date__gte=year_start,
+            operation_date__lte=year_end,
+        ).values_list("client_id", flat=True)
+    )
+    record_ids = {i for i in invoice_ids | tx_ids if i}
+    rows = []
+    for client in Client.objects.filter(owner=user):
+        if client.id in record_ids:
+            rows.append(client)
+            continue
+        if not _d(client.default_unit_price):
+            continue
+        if not engagement_overlaps(client, year_start, year_end):
+            continue
+        if client.active_from or client.active_to or year >= today.year:
+            rows.append(client)
+    rows.sort(key=lambda c: ((c.short_name or c.name).lower(), c.id))
+    return rows
+
+
+def _invoice_by_client(user, year: int, conv: Converter | None) -> dict:
+    """(client_id, month) → (quantity, net_eur). Issued wins; draft fills gaps."""
+    out: dict[tuple[int, int], tuple[Decimal, Decimal]] = {}
+    issued = Invoice.objects.filter(owner=user, service_year=year).exclude(
+        status=Invoice.STATUS_DRAFT
+    )
+    for inv in issued:
+        day = inv.sale_date or last_day_of_month(year, inv.service_month)
+        eur = _to_eur(conv, inv.net_amount, inv.currency, day)
+        key = (inv.client_id, inv.service_month)
+        qty, net = out.get(key, (_ZERO, _ZERO))
+        out[key] = (qty + _d(inv.quantity), net + eur)
+    drafts = Invoice.objects.filter(
+        owner=user, service_year=year, status=Invoice.STATUS_DRAFT
+    )
+    for inv in drafts:
+        key = (inv.client_id, inv.service_month)
+        if key in out:
+            continue
+        day = inv.sale_date or last_day_of_month(year, inv.service_month)
+        out[key] = (
+            _d(inv.quantity),
+            _to_eur(conv, inv.net_amount, inv.currency, day),
+        )
+    return out
+
+
+def _bank_by_client(user, year: int, conv: Converter | None) -> dict:
+    start = dt.date(year, 1, 1)
+    end = dt.date(year, 12, 31)
+    out: dict[tuple[int, int], Decimal] = {}
+    qs = Transaction.objects.filter(
+        owner=user,
+        client_id__isnull=False,
+        amount__gt=0,
+        operation_date__gte=start,
+        operation_date__lte=end,
+    )
+    for tx in qs:
+        eur = _to_eur(conv, tx.amount, tx.currency, tx.operation_date)
+        key = (tx.client_id, tx.operation_date.month)
+        out[key] = out.get(key, _ZERO) + eur
+    return out
+
+
+def calendar_amount(
+    client,
+    *,
+    days: int,
+    hours_per_day: int,
+    hours_override,
+    conv: Converter | None,
+    fx_date: dt.date,
+) -> tuple[Decimal, Decimal, str]:
+    """Return (quantity, eur_amount, source). Quantity is hours or days."""
+    rate = _to_eur(conv, client.default_unit_price, client.currency, fx_date)
+    if client.billing_unit == Client.UNIT_DAY:
+        qty = Decimal(days)
+        amount = (qty * rate).quantize(_CENTS, rounding=ROUND_HALF_UP)
+        return qty, amount, "calendar"
+    if hours_override not in (None, ""):
+        qty = _d(hours_override)
+        amount = (qty * rate).quantize(_CENTS, rounding=ROUND_HALF_UP)
+        return qty, amount, "override"
+    qty = Decimal(days * hours_per_day)
+    amount = (qty * rate).quantize(_CENTS, rounding=ROUND_HALF_UP)
+    return qty, amount, "calendar"
 
 
 def month_hours_plan(profile: TaxProfile, year: int, invoices: dict) -> list[dict]:
@@ -474,6 +601,101 @@ def month_hours_plan(profile: TaxProfile, year: int, invoices: dict) -> list[dic
                 "hours": _money(hours),
                 "amount": _money(amount),
                 "source": source,
+                "by_client": {},
+            }
+        )
+    return rows
+
+
+def month_client_plan(
+    profile: TaxProfile,
+    year: int,
+    clients: list,
+    invoices: dict,
+    bank: dict,
+    conv: Converter | None = None,
+    today: dt.date | None = None,
+) -> list[dict]:
+    today = today or dt.date.today()
+    hpd = int(profile.hours_per_day or 8)
+    overrides = profile.hours_overrides or {}
+    rows = []
+    for month in range(1, 13):
+        days = working_days_in_month(year, month)
+        calendar_hours = Decimal(days * hpd)
+        key = f"{year}-{month:02d}"
+        fx_date = last_day_of_month(year, month)
+        override = overrides.get(key)
+        by_client = {}
+        total = _ZERO
+        hours = calendar_hours
+        sources = []
+        invoice_hours = _ZERO
+        has_invoice_hours = False
+        for client in clients:
+            inv = invoices.get((client.id, month))
+            paid = bank.get((client.id, month))
+            engaged = client_engaged(client, year, month)
+            client_days = working_days_in_month(
+                year,
+                month,
+                start=getattr(client, "active_from", None),
+                end=getattr(client, "active_to", None),
+            )
+            if override not in (None, "") and engaged and client.billing_unit != Client.UNIT_DAY:
+                qty, amount, source = calendar_amount(
+                    client,
+                    days=client_days,
+                    hours_per_day=hpd,
+                    hours_override=override,
+                    conv=conv,
+                    fx_date=fx_date,
+                )
+                hours = qty
+            elif inv is not None:
+                qty, amount = inv
+                source = "invoice"
+                invoice_hours += qty
+                has_invoice_hours = True
+            elif paid is not None:
+                qty = calendar_hours
+                amount = paid.quantize(_CENTS, rounding=ROUND_HALF_UP)
+                source = "bank"
+            elif (
+                engaged
+                and _d(client.default_unit_price)
+                and (year, month) >= (today.year, today.month)
+            ):
+                qty, amount, source = calendar_amount(
+                    client,
+                    days=client_days,
+                    hours_per_day=hpd,
+                    hours_override=None,
+                    conv=conv,
+                    fx_date=fx_date,
+                )
+            else:
+                qty, amount, source = _ZERO, _ZERO, ""
+            if source:
+                sources.append(source)
+            by_client[str(client.id)] = {
+                "amount": _money(amount),
+                "source": source or None,
+                "quantity": _money(qty) if source else None,
+            }
+            total += amount
+        source = sources[0] if len(set(sources)) == 1 else ("mixed" if sources else "calendar")
+        rows.append(
+            {
+                "month": month,
+                "key": key,
+                "working_days": days,
+                "calendar_hours": _money(calendar_hours),
+                "invoice_hours": _money(invoice_hours) if has_invoice_hours else None,
+                "hours": _money(hours),
+                "amount": _money(total),
+                "source": source,
+                "by_client": by_client,
             }
         )
     return rows
@@ -499,8 +721,20 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
     cuota_recs = [r for r in tax_recs if r.frequency == Recurrence.FREQ_MONTH]
     irpf_recs = [r for r in tax_recs if r.frequency != Recurrence.FREQ_MONTH]
 
-    invoices = _invoice_months(user, year)
-    months = month_hours_plan(profile, year, invoices)
+    year_clients = clients_for_year(user, year, today)
+    conv = Converter(
+        [last_day_of_month(year, m) for m in range(1, 13)],
+        {c.currency for c in year_clients} | {"EUR"},
+    )
+    if year_clients:
+        invoices = _invoice_by_client(user, year, conv)
+        bank = _bank_by_client(user, year, conv)
+        months = month_client_plan(
+            profile, year, year_clients, invoices, bank, conv, today
+        )
+    else:
+        invoices = _invoice_months(user, year)
+        months = month_hours_plan(profile, year, invoices)
     hours_ytd = _ZERO
     hours_planned = _ZERO
     for row in months:
@@ -682,6 +916,17 @@ def estimate(user, year: int | None = None, today: dt.date | None = None) -> dic
             "hourly_rate": _money(_d(profile.hourly_rate) or Decimal("30")),
             "hours_per_day": int(profile.hours_per_day or 8),
         },
+        "clients": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "short_name": c.display_name(),
+                "billing_unit": c.billing_unit or Client.UNIT_HOUR,
+                "currency": c.currency,
+                "unit_price": _money(c.default_unit_price),
+            }
+            for c in year_clients
+        ],
         "expenses": {
             "ytd": _money(ytd_expenses),
             "planned": _money(planned_expenses),

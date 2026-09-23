@@ -1,4 +1,5 @@
 """Seed issuer profile, Netguru client, Revolut invoice account; optionally import XLSX."""
+from datetime import date
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
@@ -74,9 +75,13 @@ class Command(BaseCommand):
                 "address": "ul. Małe Garbary 9 61-756 Poznań",
                 "vat_mode": Client.VAT_REVERSE_CHARGE,
                 "default_vat_rate": 0,
+                "short_name": "Netguru",
                 "default_description": "Travel Zone - post MVP",
+                "billing_unit": Client.UNIT_HOUR,
                 "default_unit_price": 30,
                 "currency": "EUR",
+                "match_text": "NETGURU",
+                "active_from": date(2026, 4, 1),
                 "notes": "Foreign contractor — reverse charge / NP. Submit before 5th working day.",
             },
         )
@@ -116,6 +121,7 @@ class Command(BaseCommand):
                 due_date=parsed["due_date"],
                 description=parsed["description"] or client.default_description,
                 quantity=parsed["quantity"],
+                unit=client.billing_unit or Client.UNIT_HOUR,
                 unit_price=parsed["unit_price"] or client.default_unit_price,
                 currency=client.currency,
             )

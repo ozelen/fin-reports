@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import calendar
+import copy
 import io
 import re
 from datetime import date, timedelta
@@ -55,29 +56,53 @@ VAT_LABELS = {
 }
 
 
-def working_days_in_month(year: int, month: int) -> int:
-    """Count Mon–Fri days in a calendar month (ignores holidays)."""
+def last_day_of_month(year: int, month: int) -> date:
+    return date(year, month, calendar.monthrange(year, month)[1])
+
+
+def working_days_in_month(
+    year: int,
+    month: int,
+    start: date | None = None,
+    end: date | None = None,
+) -> int:
+    """Count Mon–Fri days in a calendar month (ignores holidays).
+
+    Optional start/end clip the count to an engagement window.
+    """
+    month_start = date(year, month, 1)
+    month_end = last_day_of_month(year, month)
+    lo = max(month_start, start) if start else month_start
+    hi = min(month_end, end) if end else month_end
+    if lo > hi:
+        return 0
     return sum(
         1
-        for day in range(1, calendar.monthrange(year, month)[1] + 1)
+        for day in range(lo.day, hi.day + 1)
         if date(year, month, day).weekday() < 5
     )
 
 
-def advise_hours(year: int, month: int, hours_per_day: int = 8) -> dict:
-    days = working_days_in_month(year, month)
+def advise_hours(
+    year: int,
+    month: int,
+    hours_per_day: int = 8,
+    unit: str = Client.UNIT_HOUR,
+    start: date | None = None,
+    end: date | None = None,
+) -> dict:
+    days = working_days_in_month(year, month, start=start, end=end)
+    suggested = days if unit == Client.UNIT_DAY else days * hours_per_day
     return {
         "year": year,
         "month": month,
         "working_days": days,
         "hours_per_day": hours_per_day,
-        "suggested_hours": days * hours_per_day,
+        "unit": unit,
+        "suggested_hours": suggested,
+        "suggested_quantity": suggested,
         "sale_date": date(year, month, calendar.monthrange(year, month)[1]).isoformat(),
     }
-
-
-def last_day_of_month(year: int, month: int) -> date:
-    return date(year, month, calendar.monthrange(year, month)[1])
 
 
 def suggest_number(owner, issue_date: date) -> str:
@@ -120,6 +145,8 @@ def apply_snapshots(invoice: Invoice) -> None:
     if invoice.client_id:
         for k, v in invoice.client.invoice_snapshot().items():
             setattr(invoice, k, v)
+        if not invoice.unit:
+            invoice.unit = invoice.client.billing_unit or Client.UNIT_HOUR
         rate, label, notes = resolve_vat(invoice.client)
         invoice.vat_rate = rate
         invoice.vat_label = label
@@ -152,7 +179,31 @@ def _date(d: date | None) -> str:
     return d.strftime("%d.%m.%Y") if d else ""
 
 
-def build_xlsx(invoice: Invoice) -> bytes:
+_REDACT_NOTE = "Redacted copy — bank details and amounts omitted."
+
+
+def _for_export(invoice: Invoice, redacted: bool = False) -> Invoice:
+    if not redacted:
+        return invoice
+    inv = copy.copy(invoice)
+    inv.iban = ""
+    inv.bic = ""
+    inv.correspondent_bic = ""
+    inv.bank_address = ""
+    inv.bank_name = ""
+    inv._hide_amounts = True
+    inv.notes = f"{invoice.notes}\n\n{_REDACT_NOTE}".strip() if invoice.notes else _REDACT_NOTE
+    return inv
+
+
+def _money_cell(invoice: Invoice, value) -> str:
+    if getattr(invoice, "_hide_amounts", False):
+        return "—"
+    return _money(value)
+
+
+def build_xlsx(invoice: Invoice, redacted: bool = False) -> bytes:
+    invoice = _for_export(invoice, redacted)
     wb = Workbook()
     ws = wb.active
     ws.title = "Invoice"
@@ -193,7 +244,8 @@ def build_xlsx(invoice: Invoice) -> bytes:
 
     ws["B13"] = "Salesperson / Vendedor"
     ws["D13"] = "Description"
-    ws["E13"] = "Cantidad"
+    unit = (invoice.unit or Client.UNIT_HOUR).lower()
+    ws["E13"] = "Días" if unit == Client.UNIT_DAY else "Horas"
     ws["F13"] = "Precio/unidad"
     ws["G13"] = "Total de línea"
     for col in ("B", "D", "E", "F", "G"):
@@ -203,10 +255,12 @@ def build_xlsx(invoice: Invoice) -> bytes:
     ws["B14"] = invoice.issuer_name
     ws["D14"] = invoice.description
     ws["E14"] = float(invoice.quantity)
-    ws["F14"] = float(invoice.unit_price)
-    ws["G14"] = float(invoice.net_amount)
-    ws["F14"].number_format = "0.00"
-    ws["G14"].number_format = '#,##0.00'
+    hide_amounts = getattr(invoice, "_hide_amounts", False)
+    ws["F14"] = "—" if hide_amounts else float(invoice.unit_price)
+    ws["G14"] = "—" if hide_amounts else float(invoice.net_amount)
+    if not hide_amounts:
+        ws["F14"].number_format = "0.00"
+        ws["G14"].number_format = "#,##0.00"
 
     ws["B16"] = "Date of Sale / Fecha de vendido"
     ws["B17"] = invoice.sale_date
@@ -229,11 +283,13 @@ def build_xlsx(invoice: Invoice) -> bytes:
     ws["G22"] = "Total"
     for cell in ("E21", "F22", "G22"):
         ws[cell].font = bold
-    ws["E23"] = float(invoice.net_amount)
-    ws["F23"] = float(invoice.vat_amount)
-    ws["G23"] = float(invoice.total_amount)
+    hide_amounts = getattr(invoice, "_hide_amounts", False)
+    ws["E23"] = "—" if hide_amounts else float(invoice.net_amount)
+    ws["F23"] = "—" if hide_amounts else float(invoice.vat_amount)
+    ws["G23"] = "—" if hide_amounts else float(invoice.total_amount)
     for cell in ("E23", "F23", "G23"):
-        ws[cell].number_format = '#,##0.00'
+        if not hide_amounts:
+            ws[cell].number_format = "#,##0.00"
         ws[cell].font = bold
 
     if invoice.notes:
@@ -275,7 +331,8 @@ def _p(text: str, style) -> Paragraph:
     return Paragraph(escape(text or "").replace("\n", "<br/>"), style)
 
 
-def build_pdf(invoice: Invoice) -> bytes:
+def build_pdf(invoice: Invoice, redacted: bool = False) -> bytes:
+    invoice = _for_export(invoice, redacted)
     font, font_bold = _pdf_fonts()
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -366,15 +423,15 @@ def build_pdf(invoice: Invoice) -> bytes:
     data = [
         [
             _p("Description", header),
-            _p("Qty", header),
+            _p("Days" if (invoice.unit or Client.UNIT_HOUR) == Client.UNIT_DAY else "Hours", header),
             _p("Unit price", header),
             _p("Line total", header),
         ],
         [
             _p(invoice.description or "", body),
             _p(qty, body),
-            _p(_money(invoice.unit_price), body),
-            _p(_money(invoice.net_amount), body),
+            _p(_money_cell(invoice, invoice.unit_price), body),
+            _p(_money_cell(invoice, invoice.net_amount), body),
         ],
     ]
     table = Table(data, colWidths=[90 * mm, 25 * mm, 30 * mm, 30 * mm])
@@ -399,15 +456,15 @@ def build_pdf(invoice: Invoice) -> bytes:
         [_p("Due date", body), _p(_date(invoice.due_date), body)],
         [
             _p("Subtotal", body),
-            _p(f"{_money(invoice.net_amount)} {invoice.currency}", body),
+            _p(f"{_money_cell(invoice, invoice.net_amount)} {invoice.currency}", body),
         ],
         [
             _p(f"VAT ({invoice.vat_label})", body),
-            _p(f"{_money(invoice.vat_amount)} {invoice.currency}", body),
+            _p(f"{_money_cell(invoice, invoice.vat_amount)} {invoice.currency}", body),
         ],
         [
             _p("Total", body_bold),
-            _p(f"{_money(invoice.total_amount)} {invoice.currency}", body_bold),
+            _p(f"{_money_cell(invoice, invoice.total_amount)} {invoice.currency}", body_bold),
         ],
     ]
     bank = [
