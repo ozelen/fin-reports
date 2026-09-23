@@ -80,3 +80,32 @@ class ClientActiveTests(DjangoTestCase):
         client = Client.objects.prefetch_related("documents").get(pk=client.pk)
         self.assertFalse(client.is_active(date(2026, 9, 6)))
         self.assertTrue(client.is_active(date(2025, 3, 1)))
+
+
+class DocumentUploadTests(DjangoTestCase):
+    def test_spooled_file_does_not_crash_empty_fields(self):
+        from django.core.files.uploadedfile import TemporaryUploadedFile
+        from django.utils.datastructures import MultiValueDict
+        from rest_framework.test import APIRequestFactory, force_authenticate
+
+        from core.serializers import DocumentSerializer
+
+        user = get_user_model().objects.create_user("u", password="x")
+        tmp = TemporaryUploadedFile("policy.pdf", "application/pdf", 10, "utf-8")
+        tmp.file.write(b"%PDF-1.4 x")
+        tmp.seek(0)
+        data = MultiValueDict(
+            {
+                "kind": ["other"],
+                "title": ["Policy schedule"],
+                "client": [""],
+                "document_date": [""],
+                "starts_on": [""],
+                "ends_on": [""],
+                "file": [tmp],
+            }
+        )
+        req = APIRequestFactory().post("/api/documents/")
+        force_authenticate(req, user=user)
+        ser = DocumentSerializer(data=data, context={"request": req})
+        self.assertTrue(ser.is_valid(), ser.errors)

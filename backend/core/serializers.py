@@ -195,13 +195,14 @@ class DocumentSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         # Multipart forms send client="" for personal docs and empty dates as "".
-        if hasattr(data, "copy"):
-            data = data.copy()
-            if data.get("client") in ("", None):
-                data["client"] = None
-            for key in ("document_date", "starts_on", "ends_on"):
-                if data.get(key) == "":
-                    data[key] = None
+        # QueryDict.copy() deep-copies uploaded files and crashes on temp-disk
+        # uploads (anything over FILE_UPLOAD_MAX_MEMORY_SIZE, ~2.5MB).
+        data = data.dict() if hasattr(data, "dict") else dict(data)
+        if data.get("client") in ("", None):
+            data["client"] = None
+        for key in ("document_date", "starts_on", "ends_on"):
+            if data.get(key) == "":
+                data[key] = None
         return super().to_internal_value(data)
 
     def validate(self, attrs):

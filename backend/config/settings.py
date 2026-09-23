@@ -144,8 +144,22 @@ CORS_ALLOWED_ORIGINS = [
     if o.strip()
 ]
 
-# Max upload size handled in-memory before spooling to disk (2.5MB default is fine).
-DATA_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024
+# Hard cap on request body size. Files over FILE_UPLOAD_MAX_MEMORY_SIZE (2.5MB)
+# still spool to disk; this only rejects the whole POST if it is larger.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}
 
 # --- Gemini (transaction classification + Telegram agent) ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
